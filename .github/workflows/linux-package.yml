@@ -2,14 +2,16 @@ name: Linux package
 
 on:
   push:
-    tags: ["**"]
+    tags: ["v*"]
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: linux-package-${{ github.event_name }}-${{ github.ref }}
+  group: linux-package-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -22,6 +24,7 @@ jobs:
   package:
     name: Build Linux x64 and verify on Debian 12
     # Keep the build host older than the minimum supported runtime distribution.
+    if: github.event_name != 'release' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     defaults:
@@ -30,6 +33,9 @@ jobs:
         working-directory: apps/desktop
     steps:
       - uses: actions/checkout@v6
+      - name: Require the tag to match the desktop version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: python3 ../../scripts/check-desktop-release-tag.py --tag "$GITHUB_REF_NAME"
       - name: Install native build dependencies
         run: |
           sudo apt-get update
@@ -138,3 +144,25 @@ jobs:
           path: ${{ runner.temp }}/astrlink-smoke/*
           if-no-files-found: ignore
           retention-days: 7
+
+  release:
+    name: Attach Linux package to Release
+    needs: package
+    if: ${{ needs.package.result == 'success' && (github.event_name == 'push' || github.event_name == 'release' || github.event_name == 'workflow_dispatch') && startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
+        with:
+          name: AstrLink-Linux-x86_64
+          path: release-assets
+      - name: Upload verified package
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mv release-assets/SHA256SUMS release-assets/SHA256SUMS-Linux-x86_64.txt
+          bash scripts/attach-github-release.sh "$GITHUB_REF_NAME" release-assets/*

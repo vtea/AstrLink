@@ -73,16 +73,20 @@ target 时位于相应 target 子目录中。应用签名、公证和正式发�
 
 ## GitHub Actions 打包
 
-三个平台有独立的打包流程，推送 `main`、在 Actions 页面选择 **Run
-workflow**，或发布 GitHub Release 即可运行：
+三个平台有独立的打包流程。推送 `v*` 版本标签（例如
+`v0.1.0`）、发布该标签的 GitHub Release，或在 Actions 页面对某个 ref 选择 **Run
+workflow** 都会构建安装包。推送普通分支不会构建。`convo/vX.Y.Z`
+这类模块标签也不会构建桌面安装包。
 
-| 流程            | 产物                                                                         |
-| --------------- | ---------------------------------------------------------------------------- |
-| macOS package   | Apple Silicon 和 Intel 的 `.dmg`、保留执行权限的 `.app.tar.gz`、`SHA256SUMS` |
-| Linux package   | x64 `.deb`、`SHA256SUMS`                                                     |
-| Windows package | x64 NSIS `.exe`                                                              |
+| 流程            | 产物                                                                                    |
+| --------------- | --------------------------------------------------------------------------------------- |
+| macOS package   | Apple Silicon 和 Intel 的 `.dmg`、保留执行权限的 `.app.tar.gz`、各自的 SHA-256 校验文件 |
+| Linux package   | x64 `.deb`、`SHA256SUMS-Linux-x86_64.txt`                                               |
+| Windows package | x64 NSIS `.exe`、`SHA256SUMS-Windows-x86_64.txt`                                        |
 
-macOS 和 Linux 的安装包仅在前端检查、Core 测试和包验证通过后上传，下载产物保留 14 天。
+macOS 和 Linux 的安装包仅在前端检查、Core 测试和包验证通过后上传。
+
+Windows 还要等同一流程里的前端与 Core 检查通过。Actions 中的下载产物保留 14 天。
 
 macOS 在对应架构的 runner 上构建并挂载 DMG 验证；Linux 在 Ubuntu
 22.04 构建，再在 Debian 12 容器内安装并校验依赖和启动。
@@ -91,31 +95,36 @@ Unix 包验证检查架构、运行库与许可证、worker 进程启动，以�
 
 失败时上传诊断文件，保留 7 天。
 
-普通推送和手动运行将产物保存在 Actions 中。
+手动运行且所选 ref 不是 `v*`
+标签时，产物只保存在 Actions 中。版本标签会在各平台自己的检查通过后，把安装包附加到同名 GitHub
+Release。三个平台互不等待。macOS 的一个架构失败时，另一个已通过的架构仍会上传，但该平台的流程保持失败。
 
-发布 Release 时，流程会构建对应标签的代码，验证成功后自动将各平台安装包和独立的 SHA-256 校验文件附加到该 Release。
-
-只有上传任务具有 `contents: write` 权限，使用 GitHub 自动提供的
+只有挂接 Release 的任务具有 `contents: write` 权限，使用 GitHub 自动提供的
 `GITHUB_TOKEN`，无需配置个人访问令牌。
 
 ### 发布版本
 
 1. 在待发布提交中同步版本号：`apps/desktop/package.json`、`apps/desktop/src-tauri/tauri.conf.json`、`apps/desktop/src-tauri/Cargo.toml`
-   和对应的 `Cargo.lock` 包条目。推送包含这些工作流的代码，并确认打包检查通过。
-2. 打开 GitHub **Releases → Draft a new
-   release**，选择该提交或分支，创建版本标签，例如
-   `v0.1.0`。标签中的版本应与应用版本一致。
-3. 填写版本说明，点击 **Publish
-   release**；预发布版本也会触发。仅保存草稿或推送标签不会触发这次 Release 打包。
-4. 在 Actions 查看三个平台的构建。完成后，安装包会出现在该 Release 的 **Assets**
-   中，各平台独立上传。发布页面在构建完成前可能暂时没有安装包。
+   和对应的 `Cargo.lock`
+   包条目。四个位置必须相同。把包含这些工作流的提交推到默认分支。
+2. 创建并推送版本标签，标签必须是 `v` 加上应用版本，例如应用版本 `0.1.0` 使用
+   `v0.1.0`。不一致时流程会在构建前失败。
+3. 也可以先在 GitHub **Releases**
+   里发布这个标签并写好说明。预发布会触发，草稿不会。只推送标签时，流程会在构建完成后创建 Release。已有 Release 时只上传资产，不改写已有说明。
+4. 在 Actions 查看三个平台的构建。完成后，安装包出现在该 Release 的 **Assets**
+   中。发布页面在构建完成前可能暂时没有安装包。
 
-构建失败时可以使用 **Re-run failed jobs**
-重试；已存在的同名附件会被该次构建覆盖。编辑已发布 Release 的说明不会重新打包。标签必须包含这些工作流，旧版本标签不会自动取得
-`main` 上的新流程。
+在同一标签上同时出现 tag
+push 和 Release 发布时，后到的重复构建会取消仍在进行的那一次。构建失败时可以使用
+**Re-run failed jobs**
+重试；已存在的同名附件会被该次构建覆盖。编辑已发布 Release 的说明不会重新打包。
 
-macOS 包仍不使用 Developer
-ID 签名或公证，发布 Release 不会改变这一点。正式签名需要另行配置 Apple 凭据。
+标签指向的提交必须包含这些工作流。`release`
+事件还要求默认分支上有这些工作流。旧版本标签不会自动取得默认分支上的新流程。
+
+macOS 包仍不使用 Developer ID 签名或公证。正式签名需要另行配置 Apple 凭据。
+
+已安装的应用不会因为新的 Release 自动升级；用户需要下载并安装新的安装包。
 
 ## 代码目录
 
