@@ -23,5 +23,8 @@ export default defineConfig({
     // process-level Tauri/browser shims. Keeping one worker makes `bun run
     // check` deterministic in constrained CI and local sandboxes.
     maxWorkers: 1,
+    // Rendering the 100-model batch dialog is under a second locally and
+    // exceeds Vitest's 5s default on slower package runners.
+    testTimeout: 20_000,
   },
 });
