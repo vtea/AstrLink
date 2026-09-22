@@ -593,10 +593,7 @@ pub fn nudge(app: &tauri::AppHandle, message: TrayMsg) {
 }
 
 pub fn lamp_overrides_icon() -> bool {
-    matches!(
-        APPLIED_LAMP.load(Ordering::Relaxed),
-        LAMP_YELLOW | LAMP_RED
-    )
+    matches!(APPLIED_LAMP.load(Ordering::Relaxed), LAMP_YELLOW | LAMP_RED)
 }
 
 fn store_lamp(lamp: Lamp) {
@@ -948,7 +945,9 @@ mod tests {
             Locale::En,
             &phase(CorePhase::Error),
             &UpstreamMemory::default(),
-        ).notice.unwrap();
+        )
+        .notice
+        .unwrap();
         let mut runtime = TrayRuntime::default();
         runtime.pending = Some(notice.clone());
         runtime.handle(TrayMsg::WindowShown);

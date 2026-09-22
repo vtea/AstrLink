@@ -684,8 +684,12 @@ mod tests {
     #[test]
     fn identical_log_messages_get_distinct_ordered_sequences() {
         let mut logger = Logger::new();
-        let first = logger.emit(Level::Info, "shell.test", "same", UNIX_EPOCH).unwrap();
-        let second = logger.emit(Level::Info, "shell.test", "same", UNIX_EPOCH).unwrap();
+        let first = logger
+            .emit(Level::Info, "shell.test", "same", UNIX_EPOCH)
+            .unwrap();
+        let second = logger
+            .emit(Level::Info, "shell.test", "same", UNIX_EPOCH)
+            .unwrap();
         assert!(first.sequence > 0);
         assert!(second.sequence > first.sequence);
         assert_eq!(logger.ring[0], first);
