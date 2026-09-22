@@ -498,14 +498,26 @@ pub(crate) use debug;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
 
+    static TEMP_DIRECTORY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
     fn temporary_directory(name: &str) -> PathBuf {
+        let sequence = TEMP_DIRECTORY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!(
-            "astrlink-app-log-{name}-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
+            "astrlink-app-log-{name}-{}-{sequence}",
+            std::process::id()
         ))
+    }
+
+    #[test]
+    fn temporary_directory_names_are_portable() {
+        let directory = temporary_directory("portable");
+        let name = directory.file_name().unwrap().to_str().unwrap();
+        assert!(name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "-_".contains(character)));
     }
 
     fn read_log(directory: &Path) -> String {
