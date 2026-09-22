@@ -15,8 +15,8 @@ import (
 	"time"
 
 	"github.com/QuantumNous/astrlink/core/contract"
-	"github.com/QuantumNous/astrlink/core/internal/accountauth"
 	"github.com/QuantumNous/astrlink/core/internal/endpoint"
+	"github.com/QuantumNous/astrlink/core/internal/networkproxy"
 	"github.com/QuantumNous/astrlink/core/internal/planner"
 	"github.com/QuantumNous/astrlink/core/internal/providerapi"
 	"github.com/QuantumNous/astrlink/core/internal/relaykitbridge"
@@ -71,6 +71,16 @@ func (handler *Handler) executeCandidates(
 	classified Request,
 	candidates []endpoint.Resolved,
 ) {
+	handler.executeCandidatesWithTest(writer, request, classified, candidates, nil)
+}
+
+func (handler *Handler) executeCandidatesWithTest(
+	writer http.ResponseWriter,
+	request *http.Request,
+	classified Request,
+	candidates []endpoint.Resolved,
+	test *serviceTestExecution,
+) {
 	if request.Context().Err() != nil {
 		return
 	}
@@ -106,6 +116,9 @@ func (handler *Handler) executeCandidates(
 	downstream := newCommitTrackingWriter(writer)
 	initialHeaders := downstream.Header().Clone()
 	controller, healthAware := handler.resolver.(endpoint.AttemptController)
+	if test != nil {
+		controller, healthAware = nil, false
+	}
 	schedule := newRecoverySchedule(candidates, body.Replayable())
 	repairedTargets := map[string][]byte{}
 	var last executionFailure
@@ -149,7 +162,11 @@ func (handler *Handler) executeCandidates(
 				convertTo = native
 			}
 		}
-		if planType == contract.PlanTypeRelayKit || convertTo != "" {
+		if test != nil {
+			// Control-plane tests validate the directly declared capability and
+			// deliberately bypass enabled/model-list gates and conversion.
+			plan = test.plan
+		} else if planType == contract.PlanTypeRelayKit || convertTo != "" {
 			if handler.conversionEngine == nil {
 				last = executionFailure{kind: executionFailureCapability, endpointID: candidate.Service.ID}
 				continue
@@ -289,10 +306,15 @@ func (handler *Handler) executeCandidates(
 		}
 		var headers http.Header
 		authorizationEndpoint, authorizeErr := candidate.AuthorizationEndpoint()
+		proxyContext := request.Context()
+		if authorizeErr == nil {
+			proxyContext, authorizeErr = networkproxy.Bind(proxyContext, candidate.Service, handler.proxyCredentials)
+			attemptRequest = attemptRequest.WithContext(proxyContext)
+		}
 		if authorizeErr == nil {
 			authorizationEndpoint.Auth = providerapi.Auth(candidate.Service.Kind, plan.UpstreamProtocol, authorizationEndpoint.Auth)
 			var headersErr error
-			headers, headersErr = handler.authorizer.Headers(request.Context(), authorizationEndpoint, attemptRequest.Header)
+			headers, headersErr = handler.authorizer.Headers(proxyContext, authorizationEndpoint, attemptRequest.Header)
 			authorizeErr = headersErr
 		}
 		if authorizeErr != nil {
@@ -310,6 +332,9 @@ func (handler *Handler) executeCandidates(
 				break
 			}
 			continue
+		}
+		if test != nil && test.observer.Authorization != nil {
+			test.observer.Authorization(headers.Clone())
 		}
 		baseURL, parseErr := url.Parse(candidate.BaseURL)
 		if parseErr != nil {
@@ -344,23 +369,10 @@ func (handler *Handler) executeCandidates(
 		}
 		health := newAttemptHealthOutcome(controller, candidate, healthAware)
 		recordSession := recordSessionFromContext(request.Context())
-		if candidate.Service.Kind == contract.ServiceKindClaudeSubscription {
-			if headers == nil {
-				headers = make(http.Header)
-			}
-			if !strings.HasPrefix(attemptRequest.Header.Get("User-Agent"), accountauth.ClaudeUserAgentPrefix) {
-				headers.Set("User-Agent", accountauth.DefaultClaudeUserAgent)
-			}
-			// Keep client feature flags while adding the subscription OAuth betas.
-			if beta := attemptRequest.Header.Get("Anthropic-Beta"); beta != "" {
-				headers.Set("Anthropic-Beta", beta+","+headers.Get("Anthropic-Beta"))
-			}
-		}
 		if candidate.Service.Kind == contract.ServiceKindOpenCodeGo || candidate.Service.Kind == contract.ServiceKindOpenCodeZen {
 			if headers == nil {
 				headers = make(http.Header)
 			}
-			headers.Set("User-Agent", "astrlink/0.1")
 			if attemptRequest.Header.Get("X-Opencode-Session") == "" && recordSession != nil {
 				sessionID := recordSession.sessionID
 				if sessionID != "" {
@@ -443,7 +455,11 @@ func (handler *Handler) executeCandidates(
 		if policy.ResponseStartTimeoutSeconds != nil {
 			responseTimeout = time.Duration(*policy.ResponseStartTimeoutSeconds) * time.Second
 		}
-		attemptContext := newResponseStartContext(request.Context(), responseTimeout)
+		if test != nil {
+			// The test owns its total deadline, independently of routing policy.
+			responseTimeout = 0
+		}
+		attemptContext := newResponseStartContext(attemptRequest.Context(), responseTimeout)
 		attemptRequest = attemptRequest.WithContext(attemptContext.Context())
 		startWriter := newResponseStartWriter(outWriter, func(status int) {
 			if attemptContext.ResponseStarted() {
@@ -454,6 +470,7 @@ func (handler *Handler) executeCandidates(
 			}
 		})
 		forwardTarget := transport.Target{
+			Service: candidate.Service, ProxyCredentials: handler.proxyCredentials,
 			BaseURL:        baseURL,
 			RequestHeaders: headers,
 		}
@@ -472,11 +489,23 @@ func (handler *Handler) executeCandidates(
 				)
 				recordSession.observeOutboundCapture(outbound)
 			}
+			if test != nil && test.observer.Outbound != nil {
+				test.observer.Outbound()
+			}
 		}
-		if recordSession != nil {
-			forwardTarget.WrapResponseBody = recordSession.wrapUpstreamResponseBody
+		forwardTarget.WrapResponseBody = func(status int, header http.Header, body io.ReadCloser) io.ReadCloser {
+			if test != nil && test.observer.WrapResponseBody != nil {
+				body = test.observer.WrapResponseBody(body)
+			}
+			if recordSession != nil {
+				body = recordSession.wrapUpstreamResponseBody(status, header, body)
+			}
+			return body
 		}
 		forwardTarget.HandleResponse = func(response *http.Response) error {
+			if test != nil && test.observer.Response != nil {
+				test.observer.Response(response.StatusCode)
+			}
 			startWriter.markStarted(response.StatusCode)
 			if response.StatusCode >= 400 {
 				action := policy.ActionForStatus(response.StatusCode)
@@ -509,7 +538,7 @@ func (handler *Handler) executeCandidates(
 					}
 				}
 				retryAfter := parseRetryAfter(response.Header.Get("Retry-After"), time.Now())
-				if response.StatusCode == http.StatusTooManyRequests {
+				if test == nil && response.StatusCode == http.StatusTooManyRequests {
 					if cooldown, ok := handler.resolver.(endpoint.RateLimitController); ok {
 						cooldown.RecordRateLimit(candidate, max(retryAfter, time.Duration(policy.InitialDelayMS)*time.Millisecond))
 					}
@@ -566,6 +595,12 @@ func (handler *Handler) executeCandidates(
 			forwardErr = turn.forward(startWriter, attemptRequest, forwardTarget, candidate, upstreamModel)
 		} else {
 			forwardErr = handler.forwarder.Forward(startWriter, attemptRequest, forwardTarget)
+		}
+		if test != nil {
+			var responseErr *transport.ResponseError
+			if errors.As(forwardErr, &responseErr) {
+				test.responseError = forwardErr
+			}
 		}
 		// Compatibility forwarders may not expose ObserveOutbound. The built-in
 		// transport always calls it immediately before I/O.
@@ -637,8 +672,10 @@ func (handler *Handler) executeCandidates(
 				session.noteSucceeded()
 				if session.status == contract.RequestStatusSucceeded {
 					session.noteRecoveryStop("succeeded")
-					handler.rememberResponseAffinity(request.Context(), session, candidate, plan)
-					handler.rememberChannelBinding(request.Context(), session, candidate)
+					if test == nil {
+						handler.rememberResponseAffinity(request.Context(), session, candidate, plan)
+						handler.rememberChannelBinding(request.Context(), session, candidate)
+					}
 				}
 			}
 			return

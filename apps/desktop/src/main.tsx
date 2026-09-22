@@ -21,6 +21,8 @@ import { AppLogsWindow } from "./AppLogsWindow";
 import { TrajectoryInspectorWindow } from "./TrajectoryInspectorWindow";
 import { isAppLogWindow } from "./app-log-window";
 import { isTrajectoryInspectorWindow } from "./trajectory-inspector-window";
+import { TrayPopoverWindow } from "./TrayPopover";
+import { isTrayPopoverWindow } from "./tray-popover-window";
 import { WindowChrome } from "./WindowChrome";
 import { getDesktopPlatform } from "./window-chrome";
 import { installAppActionLogs } from "./app-activity";
@@ -37,6 +39,10 @@ if (!root) {
 
 const desktopPlatform = getDesktopPlatform();
 document.documentElement.dataset.desktopPlatform = desktopPlatform;
+// The tray popover paints its own panel on a transparent window: no title
+// bar, no page background.
+const trayPopover = isTrayPopoverWindow();
+if (trayPopover) document.documentElement.dataset.surface = "tray-popover";
 
 initializeTheme();
 installAppActionLogs();
@@ -59,10 +65,9 @@ async function loadPreferences(): Promise<void> {
   await applyLocale(settings.values.locale);
 }
 
-void loadPreferences()
-  .catch(() => {
-    // Browser preview has no preferences IPC.
-  });
+void loadPreferences().catch(() => {
+  // Browser preview has no preferences IPC.
+});
 
 function LocaleGate({ children }: { children: ReactNode }) {
   useT();
@@ -70,7 +75,9 @@ function LocaleGate({ children }: { children: ReactNode }) {
 }
 
 // Every window loads this bundle; the label decides which app it becomes.
-const surface = isTrajectoryInspectorWindow() ? (
+const surface = trayPopover ? (
+  <TrayPopoverWindow />
+) : isTrajectoryInspectorWindow() ? (
   <TrajectoryInspectorWindow />
 ) : isAppLogWindow() ? (
   <AppLogsWindow />
@@ -83,9 +90,9 @@ createRoot(root).render(
     <I18nextProvider i18n={i18n}>
       <LocaleGate>
         <TooltipProvider>
-          <WindowChrome platform={desktopPlatform} />
+          {trayPopover ? null : <WindowChrome platform={desktopPlatform} />}
           <AppErrorBoundary>{surface}</AppErrorBoundary>
-          <Toaster position="bottom-right" />
+          {trayPopover ? null : <Toaster position="bottom-right" />}
         </TooltipProvider>
       </LocaleGate>
     </I18nextProvider>

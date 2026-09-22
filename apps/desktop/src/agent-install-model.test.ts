@@ -15,9 +15,13 @@ const status = {
       detected: true,
       skill_installed: true,
       mcp_installed: false,
+      preview_paths: [
+        "/tmp/.cursor/skills/astrlink-debug",
+        "/tmp/.cursor/mcp.json",
+      ],
     },
   ],
-  preview_paths: ["/tmp/.agents/skills/astrlink-debug"],
+  shared_paths: ["/tmp/astrlink-mcp"],
 };
 
 describe("agent-install-model", () => {
@@ -26,9 +30,24 @@ describe("agent-install-model", () => {
   });
 
   it("rejects unexpected fields", () => {
+    expect(() => parseAgentInstallStatus({ ...status, extra: true })).toThrow(
+      /unexpected field/,
+    );
+  });
+
+  it("validates shared and per-tool installation paths", () => {
+    expect(parseAgentInstallStatus(status).tools[0]?.preview_paths).toEqual(
+      status.tools[0].preview_paths,
+    );
     expect(() =>
-      parseAgentInstallStatus({ ...status, extra: true }),
-    ).toThrow(/unexpected field/);
+      parseAgentInstallStatus({ ...status, shared_paths: [null] }),
+    ).toThrow(/shared_paths/);
+    expect(() =>
+      parseAgentInstallStatus({
+        ...status,
+        tools: [{ ...status.tools[0], preview_paths: "not an array" }],
+      }),
+    ).toThrow(/preview_paths/);
   });
 
   it("parses an install receipt", () => {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { parseSettingsSnapshot } from "./preferences-model";
+import { defaultTrayPreferences, parseSettingsSnapshot } from "./preferences-model";
 
 const valid = {
   values: {
@@ -15,6 +15,7 @@ const valid = {
     max_request_body_mib: 0,
     theme: "system" as const,
     locale: "zh-CN",
+    tray: defaultTrayPreferences(),
   },
   load_warning: null,
   autostart_actual: false,
@@ -26,20 +27,45 @@ describe("preferences IPC contract", () => {
     expect(parseSettingsSnapshot(valid)).toEqual(valid);
   });
 
+  it("validates the tray section", () => {
+    const tray = defaultTrayPreferences();
+    const withTray = (patch: Record<string, unknown>) =>
+      parseSettingsSnapshot({ ...valid, values: { ...valid.values, tray: { ...tray, ...patch } } });
+    expect(withTray({ menubar_text: "cost" }).values.tray.menubar_text).toBe("cost");
+    expect(withTray({ pages: [] }).values.tray.pages).toEqual([]);
+    expect(withTray({ pages: ["agent_tools", "records"] }).values.tray.pages).toEqual(["agent_tools", "records"]);
+    expect(() => withTray({ menubar_text: "weather" })).toThrow("$.values.tray.menubar_text");
+    expect(() => withTray({ pages: ["records", "records"] })).toThrow("$.values.tray.pages[1]");
+    expect(() => withTray({ pages: ["overview"] })).toThrow("$.values.tray.pages[0]");
+    expect(() => withTray({ usage: { ...tray.usage, cost: "yes" } })).toThrow("$.values.tray.usage.cost");
+    expect(() => withTray({ usage: { ...tray.usage, streak: true } })).toThrow("$.values.tray.usage.streak");
+    expect(() => withTray({ extra: 1 })).toThrow("$.values.tray.extra");
+    expect(() =>
+      parseSettingsSnapshot({ ...valid, values: { ...valid.values, tray: undefined } }),
+    ).toThrow("$.values.tray");
+  });
+
   it("accepts supported themes and rejects missing or invalid preferences", () => {
     for (const theme of ["system", "light", "dark"]) {
-      expect(parseSettingsSnapshot({ ...valid, values: { ...valid.values, theme } }).values.theme).toBe(theme);
+      expect(
+        parseSettingsSnapshot({ ...valid, values: { ...valid.values, theme } })
+          .values.theme,
+      ).toBe(theme);
     }
     for (const theme of [undefined, null, "auto", true]) {
-      expect(() => parseSettingsSnapshot({ ...valid, values: { ...valid.values, theme } })).toThrow("$.values.theme");
+      expect(() =>
+        parseSettingsSnapshot({ ...valid, values: { ...valid.values, theme } }),
+      ).toThrow("$.values.theme");
     }
   });
 
   it("rejects unknown fields and unsafe ports", () => {
-    expect(() => parseSettingsSnapshot({
-      ...valid,
-      values: { ...valid.values, use_system_proxy: "true" },
-    })).toThrow("$.values.use_system_proxy");
+    expect(() =>
+      parseSettingsSnapshot({
+        ...valid,
+        values: { ...valid.values, use_system_proxy: "true" },
+      }),
+    ).toThrow("$.values.use_system_proxy");
     expect(() => parseSettingsSnapshot({ ...valid, surprise: true })).toThrow(
       "$.surprise",
     );
@@ -65,10 +91,29 @@ describe("preferences IPC contract", () => {
 
   it("accepts unlimited and explicit request body limits and rejects invalid values", () => {
     for (const max_request_body_mib of [0, 1, 64, 0xffffffff]) {
-      expect(parseSettingsSnapshot({ ...valid, values: { ...valid.values, max_request_body_mib } }).values.max_request_body_mib).toBe(max_request_body_mib);
+      expect(
+        parseSettingsSnapshot({
+          ...valid,
+          values: { ...valid.values, max_request_body_mib },
+        }).values.max_request_body_mib,
+      ).toBe(max_request_body_mib);
     }
-    for (const max_request_body_mib of [-1, 1.5, 0x100000000, NaN, Infinity, "8", null, undefined]) {
-      expect(() => parseSettingsSnapshot({ ...valid, values: { ...valid.values, max_request_body_mib } })).toThrow("$.values.max_request_body_mib");
+    for (const max_request_body_mib of [
+      -1,
+      1.5,
+      0x100000000,
+      NaN,
+      Infinity,
+      "8",
+      null,
+      undefined,
+    ]) {
+      expect(() =>
+        parseSettingsSnapshot({
+          ...valid,
+          values: { ...valid.values, max_request_body_mib },
+        }),
+      ).toThrow("$.values.max_request_body_mib");
     }
   });
 

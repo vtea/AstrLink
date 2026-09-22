@@ -96,7 +96,9 @@ describe("WindowChrome", () => {
       root.render(<WindowChrome platform="macos" />);
     });
 
-    expect(container.querySelector('header[aria-label="窗口控制栏"]')).not.toBeNull();
+    expect(
+      container.querySelector('header[aria-label="窗口控制栏"]'),
+    ).not.toBeNull();
     expect(
       container.querySelector(
         '[data-slot="window-drag-region"][data-tauri-drag-region]',
@@ -139,9 +141,7 @@ describe("WindowChrome", () => {
         new MouseEvent("mousedown", { bubbles: true, button: 0 }),
       );
     });
-    expect(windowMocks.startResizeDragging).toHaveBeenCalledWith(
-      "SouthEast",
-    );
+    expect(windowMocks.startResizeDragging).toHaveBeenCalledWith("SouthEast");
   });
 
   it("uses the GTK control sides without adding a title", async () => {
@@ -179,7 +179,9 @@ describe("WindowChrome", () => {
     await act(async () => undefined);
 
     expect(control(container, "还原窗口")).not.toBeNull();
-    expect(container.querySelector('[data-slot="window-resize-handle"]')).toBeNull();
+    expect(
+      container.querySelector('[data-slot="window-resize-handle"]'),
+    ).toBeNull();
 
     await act(async () => root.unmount());
     expect(windowMocks.unlistenFocus).toHaveBeenCalledOnce();

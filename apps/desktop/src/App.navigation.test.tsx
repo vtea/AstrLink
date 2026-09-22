@@ -45,8 +45,11 @@ const bridgeMocks = vi.hoisted(() => ({
   getAppLogLocation: vi.fn(),
   getPreferences: vi.fn(),
   revealAppLog: vi.fn(),
+  getTrayState: vi.fn().mockRejectedValue(new Error("tray unavailable in tests")),
   getRoutingSettings: vi.fn(),
-  getServiceOrder: vi.fn().mockResolvedValue({ service_ids: [], etag: '"order"' }),
+  getServiceOrder: vi
+    .fn()
+    .mockResolvedValue({ service_ids: [], etag: '"order"' }),
   updateServiceOrder: vi.fn(),
   listRecoveryPaths: vi.fn(),
   installAgentDebug: vi.fn(),
@@ -96,6 +99,7 @@ vi.mock("./bridge", () => bridgeMocks);
 
 import App from "./App";
 import type { AppSnapshot } from "./core-model";
+import { defaultTrayPreferences } from "./preferences-model";
 import { defaultFailurePolicy } from "./failure-policy-model";
 import { defaultPrivacyKindRules } from "./privacy-policy-model";
 
@@ -150,7 +154,9 @@ const readySnapshot: AppSnapshot = {
 
 function button(label: string): HTMLButtonElement {
   const match = [...document.querySelectorAll("button")].find(
-    (candidate) => (candidate.getAttribute("aria-label") ?? candidate.textContent?.trim()) === label,
+    (candidate) =>
+      (candidate.getAttribute("aria-label") ??
+        candidate.textContent?.trim()) === label,
   );
   if (!(match instanceof HTMLButtonElement)) {
     throw new Error(`Missing button: ${label}`);
@@ -160,7 +166,9 @@ function button(label: string): HTMLButtonElement {
 
 function workspaceHeading(): HTMLHeadingElement {
   const headings = [
-    ...document.querySelectorAll<HTMLHeadingElement>('[data-slot="workspace"] h1'),
+    ...document.querySelectorAll<HTMLHeadingElement>(
+      '[data-slot="workspace"] h1',
+    ),
   ];
   if (headings.length !== 1) {
     throw new Error(`Expected one workspace heading, found ${headings.length}`);
@@ -197,13 +205,15 @@ async function chooseOption(label: string, option: string): Promise<void> {
     );
     await Promise.resolve();
   });
-  const item = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find(
-    (candidate) => {
-      const label = candidate.cloneNode(true) as HTMLElement;
-      label.querySelectorAll('[aria-hidden="true"]').forEach(icon => icon.remove());
-      return label.textContent?.trim() === option;
-    },
-  );
+  const item = [
+    ...document.querySelectorAll<HTMLElement>('[role="option"]'),
+  ].find((candidate) => {
+    const label = candidate.cloneNode(true) as HTMLElement;
+    label
+      .querySelectorAll('[aria-hidden="true"]')
+      .forEach((icon) => icon.remove());
+    return label.textContent?.trim() === option;
+  });
   if (!item) throw new Error(`Missing select option: ${option}`);
   await act(async () => {
     item.click();
@@ -228,7 +238,12 @@ describe("App workspace navigation", () => {
       "/tmp/com.astrlink.desktop/logs/astrlink.log",
     );
     bridgeMocks.revealAppLog.mockResolvedValue(undefined);
-    bridgeMocks.getRoutingSettings.mockResolvedValue({ default_failure_policy: defaultFailurePolicy(), allow_unmatched_failover: false, strategy: "retry_first", max_attempts: 6 });
+    bridgeMocks.getRoutingSettings.mockResolvedValue({
+      default_failure_policy: defaultFailurePolicy(),
+      allow_unmatched_failover: false,
+      strategy: "retry_first",
+      max_attempts: 6,
+    });
     bridgeMocks.listRecoveryPaths.mockResolvedValue([]);
     bridgeMocks.getCoreStatus.mockResolvedValue(readySnapshot);
     bridgeMocks.listServices.mockResolvedValue({
@@ -344,8 +359,21 @@ describe("App workspace navigation", () => {
     });
     bridgeMocks.getUsageSummary.mockImplementation(async (window) => ({
       window,
-      totals: { requests: 0, failed_requests: 0, input_tokens: 0, output_tokens: 0, total_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0 },
-      by_day: [], by_hour: [], by_service: [], by_model: [], scanned_records: 0, capped: false,
+      totals: {
+        requests: 0,
+        failed_requests: 0,
+        input_tokens: 0,
+        output_tokens: 0,
+        total_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+      },
+      by_day: [],
+      by_hour: [],
+      by_service: [],
+      by_model: [],
+      scanned_records: 0,
+      capped: false,
     }));
     bridgeMocks.listRequestSessions.mockResolvedValue({
       items: [],
@@ -376,21 +404,24 @@ describe("App workspace navigation", () => {
           detected: true,
           skill_installed: false,
           mcp_installed: false,
+          preview_paths: [],
         },
         {
           id: "claude",
           detected: false,
           skill_installed: false,
           mcp_installed: false,
+          preview_paths: [],
         },
         {
           id: "codex",
           detected: true,
           skill_installed: true,
           mcp_installed: true,
+          preview_paths: [],
         },
       ],
-      preview_paths: [],
+      shared_paths: [],
     });
     container = document.createElement("div");
     document.body.append(container);
@@ -422,11 +453,15 @@ describe("App workspace navigation", () => {
     expect(
       document.querySelector('[aria-current="page"]')?.textContent,
     ).toContain("概览");
-    expect(container.querySelectorAll('[data-slot="page-header"]')).toHaveLength(1);
+    expect(
+      container.querySelectorAll('[data-slot="page-header"]'),
+    ).toHaveLength(1);
     expect(workspaceHeading().textContent).toBe("概览");
     expect(container.textContent).toContain("API 地址");
     expect(container.textContent).toContain("用量概览");
-    expect(container.querySelector("[data-slot='activity-heatmap']")).not.toBeNull();
+    expect(
+      container.querySelector("[data-slot='activity-heatmap']"),
+    ).not.toBeNull();
     expect(container.textContent).toContain("按 API 提供商");
     expect(container.textContent).toContain("按模型");
     expect(container.textContent).toContain("Primary gateway");
@@ -470,10 +505,12 @@ describe("App workspace navigation", () => {
       button("添加 API 提供商").click();
     });
     expect(workspaceHeading().textContent).toBe("添加 API 提供商");
-    expect(container.querySelector('[data-testid="service-form"]')).not.toBeNull();
-    expect(container.querySelector('[data-slot="workspace"]')?.className).toContain(
-      "overflow-hidden",
-    );
+    expect(
+      container.querySelector('[data-testid="service-form"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-slot="workspace"]')?.className,
+    ).toContain("overflow-hidden");
 
     const back = container.querySelector<HTMLButtonElement>(
       'button[aria-label="返回 API 提供商列表"]',
@@ -532,9 +569,9 @@ describe("App workspace navigation", () => {
   it("keeps Codex subscription inside API services instead of the sidebar", async () => {
     await renderApp();
 
-    expect(container.querySelector('[data-slot="sidebar-navigation"]')?.textContent).not.toContain(
-      "Codex 订阅",
-    );
+    expect(
+      container.querySelector('[data-slot="sidebar-navigation"]')?.textContent,
+    ).not.toContain("Codex 订阅");
 
     await act(async () => {
       button("API 提供商").click();
@@ -560,13 +597,14 @@ describe("App workspace navigation", () => {
         autostart: false,
         core_auto_start: true,
         core_auto_recover: true,
-    use_system_proxy: true,
+        use_system_proxy: true,
         inference_port: 8317,
         max_concurrent_inspections: 16,
         response_start_timeout_seconds: 0,
-    max_request_body_mib: 0,
+        max_request_body_mib: 0,
         locale: "zh-CN",
         theme: "system",
+        tray: defaultTrayPreferences(),
       },
       load_warning: null,
       autostart_actual: false,
@@ -632,13 +670,14 @@ describe("App workspace navigation", () => {
         autostart: false,
         core_auto_start: true,
         core_auto_recover: true,
-    use_system_proxy: true,
+        use_system_proxy: true,
         inference_port: 8317,
         max_concurrent_inspections: 16,
         response_start_timeout_seconds: 0,
-    max_request_body_mib: 0,
+        max_request_body_mib: 0,
         locale: "zh-CN",
         theme: "system",
+        tray: defaultTrayPreferences(),
       },
       load_warning: null,
       autostart_actual: false,
@@ -649,7 +688,9 @@ describe("App workspace navigation", () => {
       button("设置").click();
       await Promise.resolve();
     });
-    const port = container.querySelector<HTMLInputElement>('input[type="number"]');
+    const port = container.querySelector<HTMLInputElement>(
+      'input[type="number"]',
+    );
     if (!port) throw new Error("missing settings port input");
     await act(async () => {
       const setter = Object.getOwnPropertyDescriptor(
@@ -687,8 +728,11 @@ describe("App workspace navigation", () => {
     expect(container.textContent).not.toContain("训练中 · 不可启用");
     expect(container.textContent).not.toContain("固定路由与别名");
     expect(container.textContent).not.toContain("还没有固定路由");
-    expect([...container.querySelectorAll('[role="tab"]')].map((tab) => tab.textContent))
-      .toEqual(["恢复与重试", "错误规则", "会话粘性"]);
+    expect(
+      [...container.querySelectorAll('[role="tab"]')].map(
+        (tab) => tab.textContent,
+      ),
+    ).toEqual(["恢复与重试", "错误规则", "会话粘性", "转发身份"]);
     expect(container.textContent).not.toContain("mmBERT");
     expect(bridgeMocks.listRoutes).not.toHaveBeenCalled();
     expect(bridgeMocks.listServices).toHaveBeenCalledTimes(serviceCalls);
@@ -712,7 +756,11 @@ describe("App workspace navigation", () => {
 
     const today = new Date();
     expect(to.getDate()).toBe(
-      new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1).getDate(),
+      new Date(
+        today.getFullYear(),
+        today.getMonth(),
+        today.getDate() + 1,
+      ).getDate(),
     );
   });
 
@@ -827,8 +875,14 @@ describe("App workspace navigation", () => {
     await act(async () => button("API 提供商").click());
     await act(async () => button("添加 API 提供商").click());
     await chooseOption("API 提供商类型", "New API");
-    await setInput('[data-testid="service-form"] input[type="url"]', "https://saved.example");
-    await setInput('[data-testid="service-form"] input[type="password"]', "secret-key");
+    await setInput(
+      '[data-testid="service-form"] input[type="url"]',
+      "https://saved.example",
+    );
+    await setInput(
+      '[data-testid="service-form"] input[type="password"]',
+      "secret-key",
+    );
     await act(async () => {
       button("保存 API 提供商").click();
       await Promise.resolve();
@@ -909,9 +963,17 @@ describe("App workspace navigation", () => {
     await renderApp();
     await act(async () => button("路由").click());
     const label = "最多重试几次";
-    const input = [...container.querySelectorAll("label")].find((item) => item.querySelector(":scope > span")?.textContent === label)?.querySelector("input")!;
+    const input = [...container.querySelectorAll("label")]
+      .find(
+        (item) => item.querySelector(":scope > span")?.textContent === label,
+      )
+      ?.querySelector("input");
+    if (!input) throw new Error(`Missing input: ${label}`);
     await act(async () => {
-      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "4");
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )!.set!.call(input, "4");
       input.dispatchEvent(new Event("input", { bubbles: true }));
     });
     await act(async () => button("概览").click());
@@ -923,5 +985,4 @@ describe("App workspace navigation", () => {
     await act(async () => button("放弃修改并离开").click());
     expect(workspaceHeading().textContent).toBe("概览");
   });
-
 });

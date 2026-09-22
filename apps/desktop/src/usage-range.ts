@@ -1,6 +1,7 @@
 import { i18n } from "./i18n";
 import {
   displayRequestStatus,
+  isModelDiscoveryProtocol,
   type RequestRecord,
 } from "./request-record-model";
 
@@ -365,11 +366,13 @@ export interface UsageAggregate {
 }
 
 /**
- * Fold root records into totals and breakdowns. Retry children are skipped so a
- * failed attempt that later succeeded is never counted twice, and only
- * successful roots contribute tokens.
+ * Fold inference root records into totals and breakdowns. Discovery and retry
+ * children are skipped so a failed attempt that later succeeded is never
+ * counted twice, and only successful roots contribute tokens.
  */
-export function aggregateUsageRecords(records: RequestRecord[]): UsageAggregate {
+export function aggregateUsageRecords(
+  records: RequestRecord[],
+): UsageAggregate {
   const totals = emptyUsageTotals();
   const serviceMap = new Map<string, UsageGroup>();
   const modelMap = new Map<string, UsageGroup>();
@@ -434,11 +437,12 @@ export function aggregateUsage(
   };
 }
 
-/** Failed and succeeded roots only; retry children never count. */
+/** Failed and succeeded inference roots only; discovery and retries never count. */
 function usageRecordStatus(
   record: RequestRecord,
 ): "failed" | "succeeded" | null {
   if (record.parent_request_id !== null) return null;
+  if (isModelDiscoveryProtocol(record.input_protocol)) return null;
   const status = displayRequestStatus(record.status, record.http_status);
   if (status !== "failed" && status !== "succeeded") return null;
   return status;
@@ -541,7 +545,10 @@ export function usageBarPercent(
   value: number,
   groups: Array<Pick<UsageGroup, "total_tokens">>,
 ): number {
-  const max = groups.reduce((highest, group) => Math.max(highest, group.total_tokens), 0);
+  const max = groups.reduce(
+    (highest, group) => Math.max(highest, group.total_tokens),
+    0,
+  );
   if (max <= 0 || value <= 0) return 0;
   return Math.round((value / max) * 100);
 }
@@ -664,5 +671,8 @@ function compareUsageThenName(
     return right.total_tokens - left.total_tokens;
   }
   if (right.requests !== left.requests) return right.requests - left.requests;
-  return left.name.localeCompare(right.name, i18n.language === "zh-CN" ? "zh" : "en");
+  return left.name.localeCompare(
+    right.name,
+    i18n.language === "zh-CN" ? "zh" : "en",
+  );
 }

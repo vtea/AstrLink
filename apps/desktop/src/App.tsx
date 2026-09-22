@@ -1,10 +1,6 @@
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { isTauri } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   Activity,
   Bot,
@@ -59,6 +55,7 @@ import { detachedLogWindowEnabled, showAppLogWindow } from "./app-log-window";
 import { SettingsCenter } from "./SettingsCenter";
 import { ServiceManager, type ServiceManagerView } from "./ServiceManager";
 import type { Service } from "./service-model";
+import { TRAY_NAVIGATE_EVENT } from "./tray-popover-window";
 import {
   DEFAULT_USAGE_RANGE_PRESET,
   resolveUsageWindow,
@@ -112,6 +109,23 @@ function messageOf(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
 }
 
+/** The pages the tray popover may open; anything else is ignored. */
+export function trayNavigationTarget(kind: unknown): WorkspacePage | null {
+  switch (kind) {
+    case "overview":
+    case "tokens":
+    case "safety":
+    case "records":
+    case "routing":
+    case "agentTools":
+    case "settings":
+    case "list":
+      return { kind };
+    default:
+      return null;
+  }
+}
+
 const icons: Record<IconName, AnimatedIcon> = {
   activity: Activity,
   bot: Bot,
@@ -127,7 +141,11 @@ const icons: Record<IconName, AnimatedIcon> = {
 function Icon({ className, name }: { className?: string; name: IconName }) {
   const IconComponent = icons[name];
   return (
-    <IconComponent aria-hidden="true" className={cn("size-4 shrink-0", className)} strokeWidth={1.6} />
+    <IconComponent
+      aria-hidden="true"
+      className={cn("size-4 shrink-0", className)}
+      strokeWidth={1.6}
+    />
   );
 }
 
@@ -162,8 +180,14 @@ function NavButton({
       variant="ghost"
     >
       <Icon className="size-5" name={icon} />
-      <span className="overflow-hidden text-ellipsis whitespace-nowrap max-[900px]:hidden">{label}</span>
-      {disabled ? <Badge className="ml-auto max-[900px]:hidden" variant="secondary">{i18n.t("common.comingSoonBadge")}</Badge> : null}
+      <span className="overflow-hidden text-ellipsis whitespace-nowrap max-[900px]:hidden">
+        {label}
+      </span>
+      {disabled ? (
+        <Badge className="ml-auto max-[900px]:hidden" variant="secondary">
+          {i18n.t("common.comingSoonBadge")}
+        </Badge>
+      ) : null}
     </Button>
   );
 }
@@ -252,7 +276,10 @@ export default function App() {
     } catch (error) {
       if (requestGate.isCurrent(generation)) {
         setSnapshot((current) =>
-          failedSnapshot(current, messageOf(error, i18n.t("app.restartFailed"))),
+          failedSnapshot(
+            current,
+            messageOf(error, i18n.t("app.restartFailed")),
+          ),
         );
       }
     } finally {
@@ -459,8 +486,10 @@ export default function App() {
             next.serviceId !== page.serviceId));
       const leavingRouteEditor =
         page.kind === "routing" && next.kind !== "routing";
-      const leavingSettings = page.kind === "settings" && next.kind !== "settings";
-      const leavingEditor = leavingServiceEditor || leavingRouteEditor || leavingSettings;
+      const leavingSettings =
+        page.kind === "settings" && next.kind !== "settings";
+      const leavingEditor =
+        leavingServiceEditor || leavingRouteEditor || leavingSettings;
       if (leavingEditor && editorDirtyRef.current) {
         setPendingPage(next);
         return;
@@ -474,6 +503,31 @@ export default function App() {
 
   useTrayNotices(navigate);
 
+  // The tray popover routes through the same guard as the sidebar, so a dirty
+  // editor still gets its confirmation.
+  const navigateRef = useRef(navigate);
+  navigateRef.current = navigate;
+  useEffect(() => {
+    if (!isTauri()) return;
+    let cancelled = false;
+    let stop: UnlistenFn | null = null;
+    listen<unknown>(TRAY_NAVIGATE_EVENT, ({ payload }) => {
+      const target = trayNavigationTarget(payload);
+      if (target) navigateRef.current(target);
+    })
+      .then((unlisten) => {
+        if (cancelled) unlisten();
+        else stop = unlisten;
+      })
+      .catch((error) =>
+        appLog.error("ui.tray", "Unable to observe AstrLink tray navigation", error),
+      );
+    return () => {
+      cancelled = true;
+      stop?.();
+    };
+  }, []);
+
   const confirmPendingNavigation = () => {
     if (pendingPage === null) return;
     setPage(pendingPage);
@@ -483,11 +537,15 @@ export default function App() {
 
   const handleServiceSaved = (service: Service) => {
     setCatalog((current) => {
-      const existingIndex = current.items.findIndex((item) => item.id === service.id);
+      const existingIndex = current.items.findIndex(
+        (item) => item.id === service.id,
+      );
       const items =
         existingIndex === -1
           ? [...current.items, service]
-          : current.items.map((item) => (item.id === service.id ? service : item));
+          : current.items.map((item) =>
+              item.id === service.id ? service : item,
+            );
       return { status: "ready", items, error: null, stale: false };
     });
     handleEditorDirtyChange(false);
@@ -506,10 +564,7 @@ export default function App() {
   const handleTokenCreated = (token: AccessTokenSummary) => {
     setTokenCatalog((current) => ({
       status: "ready",
-      items: [
-        token,
-        ...current.items.filter((item) => item.id !== token.id),
-      ],
+      items: [token, ...current.items.filter((item) => item.id !== token.id)],
       error: null,
       stale: false,
     }));
@@ -527,7 +582,9 @@ export default function App() {
   const serviceSectionActive =
     page.kind === "list" || page.kind === "create" || page.kind === "edit";
   const statusTone = snapshot ? phaseTone(snapshot.phase) : "neutral";
-  const statusLabel = snapshot ? phaseLabel(snapshot.phase) : t("core.phase.connecting");
+  const statusLabel = snapshot
+    ? phaseLabel(snapshot.phase)
+    : t("core.phase.connecting");
   const protocols = useMemo(
     () => snapshot?.capabilities?.protocols ?? [],
     [snapshot?.capabilities?.protocols],
@@ -536,203 +593,220 @@ export default function App() {
   return (
     <AppShell
       sidebar={
-      <aside className="flex h-full min-h-0 flex-col border-r bg-sidebar px-3 pt-[calc(var(--window-chrome-height)+16px)] pb-3 max-[900px]:px-2 max-[900px]:pb-2.5">
-        <div className="flex items-center gap-3 px-2 pb-5 max-[900px]:justify-center max-[900px]:px-0">
-          <img
-            className="block size-8 shrink-0"
-            src={astrlinkLogo}
-            alt=""
-            width={32}
-            height={32}
-            aria-hidden="true"
-          />
-          <span className="overflow-hidden text-xl font-semibold tracking-tight whitespace-nowrap max-[900px]:hidden">AstrLink</span>
-        </div>
+        <aside className="flex h-full min-h-0 flex-col border-r bg-sidebar px-3 pt-[calc(var(--window-chrome-height)+16px)] pb-3 max-[900px]:px-2 max-[900px]:pb-2.5">
+          <div className="flex items-center gap-3 px-2 pb-5 max-[900px]:justify-center max-[900px]:px-0">
+            <img
+              className="block size-8 shrink-0"
+              src={astrlinkLogo}
+              alt=""
+              width={32}
+              height={32}
+              aria-hidden="true"
+            />
+            <span className="overflow-hidden text-xl font-semibold tracking-tight whitespace-nowrap max-[900px]:hidden">
+              AstrLink
+            </span>
+          </div>
 
-        <nav className="flex flex-1 flex-col gap-1" aria-label={t("nav.main")} data-slot="sidebar-navigation">
-          <span className="px-2 pb-1.5 text-xs font-medium tracking-[0.08em] text-muted-foreground uppercase max-[900px]:hidden">{t("nav.workspace")}</span>
-          <NavButton
-            active={page.kind === "overview"}
-            icon="home"
-            label={t("nav.overview")}
-            onClick={() => navigate({ kind: "overview" })}
-          />
-          <NavButton
-            active={serviceSectionActive}
-            icon="server"
-            label={t("nav.services")}
-            onClick={() => navigate({ kind: "list" })}
-          />
-          <NavButton
-            active={page.kind === "tokens"}
-            icon="key"
-            label={t("nav.tokens")}
-            onClick={() => navigate({ kind: "tokens" })}
-          />
-          <NavButton
-            active={page.kind === "safety"}
-            icon="shield"
-            label={t("nav.safety")}
-            onClick={() => navigate({ kind: "safety" })}
-          />
-          <NavButton
-            active={page.kind === "records"}
-            icon="activity"
-            label={t("nav.records")}
-            onClick={() => navigate({ kind: "records" })}
-          />
-          <NavButton
-            active={page.kind === "routing"}
-            icon="route"
-            label={t("nav.routing")}
-            onClick={() => navigate({ kind: "routing" })}
-          />
+          <nav
+            className="flex flex-1 flex-col gap-1"
+            aria-label={t("nav.main")}
+            data-slot="sidebar-navigation"
+          >
+            <span className="px-2 pb-1.5 text-xs font-medium tracking-[0.08em] text-muted-foreground uppercase max-[900px]:hidden">
+              {t("nav.workspace")}
+            </span>
+            <NavButton
+              active={page.kind === "overview"}
+              icon="home"
+              label={t("nav.overview")}
+              onClick={() => navigate({ kind: "overview" })}
+            />
+            <NavButton
+              active={serviceSectionActive}
+              icon="server"
+              label={t("nav.services")}
+              onClick={() => navigate({ kind: "list" })}
+            />
+            <NavButton
+              active={page.kind === "tokens"}
+              icon="key"
+              label={t("nav.tokens")}
+              onClick={() => navigate({ kind: "tokens" })}
+            />
+            <NavButton
+              active={page.kind === "safety"}
+              icon="shield"
+              label={t("nav.safety")}
+              onClick={() => navigate({ kind: "safety" })}
+            />
+            <NavButton
+              active={page.kind === "records"}
+              icon="activity"
+              label={t("nav.records")}
+              onClick={() => navigate({ kind: "records" })}
+            />
+            <NavButton
+              active={page.kind === "routing"}
+              icon="route"
+              label={t("nav.routing")}
+              onClick={() => navigate({ kind: "routing" })}
+            />
 
-          <span className="mt-4 px-2 pb-1.5 text-xs font-medium tracking-[0.08em] text-muted-foreground uppercase max-[900px]:mx-2 max-[900px]:mt-3 max-[900px]:mb-2 max-[900px]:h-px max-[900px]:bg-border max-[900px]:p-0 max-[900px]:text-transparent">{t("nav.system")}</span>
-          <NavButton
-            active={page.kind === "agentTools"}
-            icon="bot"
-            label={t("nav.agentTools")}
-            onClick={() => navigate({ kind: "agentTools" })}
-          />
-          <NavButton
-            active={page.kind === "logs"}
-            icon="scan"
-            label={t("nav.logs")}
-            onClick={() => {
-              if (detachedLogWindowEnabled()) {
-                void showAppLogWindow().catch((error: unknown) => {
-                  appLog.error("ui.logs", "Unable to open the log window", error);
-                });
-                return;
-              }
-              navigate({ kind: "logs" });
-            }}
-          />
-          <NavButton
-            active={page.kind === "settings"}
-            icon="settings"
-            label={t("nav.settings")}
-            onClick={() => navigate({ kind: "settings" })}
-          />
-        </nav>
+            <span className="mt-4 px-2 pb-1.5 text-xs font-medium tracking-[0.08em] text-muted-foreground uppercase max-[900px]:mx-2 max-[900px]:mt-3 max-[900px]:mb-2 max-[900px]:h-px max-[900px]:bg-border max-[900px]:p-0 max-[900px]:text-transparent">
+              {t("nav.system")}
+            </span>
+            <NavButton
+              active={page.kind === "agentTools"}
+              icon="bot"
+              label={t("nav.agentTools")}
+              onClick={() => navigate({ kind: "agentTools" })}
+            />
+            <NavButton
+              active={page.kind === "logs"}
+              icon="scan"
+              label={t("nav.logs")}
+              onClick={() => {
+                if (detachedLogWindowEnabled()) {
+                  void showAppLogWindow().catch((error: unknown) => {
+                    appLog.error("ui.logs", "Unable to open the log window", error);
+                  });
+                  return;
+                }
+                navigate({ kind: "logs" });
+              }}
+            />
+            <NavButton
+              active={page.kind === "settings"}
+              icon="settings"
+              label={t("nav.settings")}
+              onClick={() => navigate({ kind: "settings" })}
+            />
+          </nav>
 
-        <div
-          aria-label={t("nav.gatewayStatus", { status: statusLabel })}
-          className="mt-3 flex items-center gap-2 border-t px-2 pt-3 text-text-secondary max-[900px]:justify-center max-[900px]:px-0"
-          title={t("nav.gatewayStatus", { status: statusLabel })}
-        >
-          <StatusDot tone={statusTone} />
-          <span className="flex min-w-0 items-baseline gap-1.5 max-[900px]:hidden">
-            <strong className="text-sm font-medium text-foreground">{t("nav.gateway")}</strong>
-            <small className="overflow-hidden text-xs text-ellipsis whitespace-nowrap">{statusLabel}</small>
-          </span>
-        </div>
-      </aside>
+          <div
+            aria-label={t("nav.gatewayStatus", { status: statusLabel })}
+            className="mt-3 flex items-center gap-2 border-t px-2 pt-3 text-text-secondary max-[900px]:justify-center max-[900px]:px-0"
+            title={t("nav.gatewayStatus", { status: statusLabel })}
+          >
+            <StatusDot tone={statusTone} />
+            <span className="flex min-w-0 items-baseline gap-1.5 max-[900px]:hidden">
+              <strong className="text-sm font-medium text-foreground">
+                {t("nav.gateway")}
+              </strong>
+              <small className="overflow-hidden text-xs text-ellipsis whitespace-nowrap">
+                {statusLabel}
+              </small>
+            </span>
+          </div>
+        </aside>
       }
     >
-        <main
-          className={cn(
-            // One measure for every page: content stops at 1080px and stays
-            // centred, so a single row of data never spans the whole window.
-            "@container/workspace-surface mx-auto h-full min-h-0 w-full max-w-[1080px] min-w-0 px-8 pt-[calc(var(--window-chrome-height)+28px)] pb-8 max-[900px]:px-5 max-h-[680px]:pt-[calc(var(--window-chrome-height)+18px)] max-h-[680px]:pb-5",
-            "flex flex-col",
-            ["overview", "list", "create", "edit", "tokens", "records", "safety", "routing", "agentTools", "logs"].includes(
-              page.kind,
-            )
-              ? "overflow-hidden"
-              : "overflow-y-auto overscroll-none",
-          )}
-          data-page={page.kind}
-          data-slot="workspace"
-        >
-          {page.kind === "overview" ? (
-            <Overview
-              catalog={catalog}
-              copyError={copyError}
-              copyFeedback={copyFeedback}
-              isNativeApp={isNativeApp}
-              isReady={isReady}
-              isRestarting={isRestarting}
-              onAddService={() => navigate({ kind: "create" })}
-              onCopy={(value, label) => void copyValue(value, label)}
-              onManageServices={() => navigate({ kind: "list" })}
-              onManageTokens={() => navigate({ kind: "tokens" })}
-              onOpenService={(serviceId) => navigate({ kind: "edit", serviceId })}
-              onRefreshServices={() => void refreshServices()}
-              onRefreshUsage={() => void refreshUsage()}
-              onRestart={() => void handleRestart()}
-              onUsagePresetChange={setUsagePreset}
-              snapshot={snapshot}
-              tokenCatalog={tokenCatalog}
-              usage={usage}
-              usagePreset={usagePreset}
-            />
-          ) : page.kind === "tokens" ? (
-            <AccessTokenManager
-              catalog={tokenCatalog}
-              coreSessionKey={coreSessionKey}
-              inferenceURL={snapshot?.ready?.inference_url ?? ""}
-              isReady={isReady}
-              onRefresh={() => void refreshAccessTokens()}
-              onTokenCreated={handleTokenCreated}
-              onTokenDeleted={handleTokenDeleted}
-            />
-          ) : page.kind === "safety" ? (
-            <SafetyPolicy
-              coreSessionKey={coreSessionKey}
-              isReady={isReady}
-            />
-          ) : page.kind === "records" ? (
-            <RequestRecords
-              coreSessionKey={coreSessionKey}
-              services={catalog.items}
-              isReady={isReady}
-            />
-          ) : page.kind === "routing" ? (
-            <RouteManager
-              coreSessionKey={coreSessionKey}
-              services={catalog.items}
-              isReady={isReady}
-              onDirtyChange={handleEditorDirtyChange}
-              onManageServices={() => navigate({ kind: "list" })}
-              protocols={protocols}
-            />
-          ) : page.kind === "agentTools" ? (
-            <AgentDebugSettings />
-          ) : page.kind === "logs" ? (
-            <AppLogs />
-          ) : page.kind === "settings" ? (
-            <SettingsCenter
-              onCoreSnapshot={setSnapshot}
-              onDirtyChange={handleEditorDirtyChange}
-              snapshot={snapshot}
-            />
-          ) : (
-            <ServiceManager
-              catalogError={catalog.error}
-              catalogStatus={catalog.status}
-              conversionEngine={snapshot?.capabilities?.conversion_engine}
-              isReady={isReady}
-              onDirtyChange={handleEditorDirtyChange}
-              onRefresh={() => void refreshServices()}
-              onServiceRemoved={handleServiceRemoved}
-              onServiceSaved={handleServiceSaved}
-              onViewChange={(next) => navigate(next)}
-              protocols={protocols}
-              services={catalog.items}
-              view={page}
-            />
-          )}
-        </main>
+      <main
+        className={cn(
+          // One measure for every page: content stops at 1080px and stays
+          // centred, so a single row of data never spans the whole window.
+          "@container/workspace-surface mx-auto h-full min-h-0 w-full max-w-[1080px] min-w-0 px-8 pt-[calc(var(--window-chrome-height)+28px)] pb-8 max-[900px]:px-5 max-h-[680px]:pt-[calc(var(--window-chrome-height)+18px)] max-h-[680px]:pb-5",
+          "flex flex-col",
+          [
+            "overview",
+            "list",
+            "create",
+            "edit",
+            "tokens",
+            "records",
+            "safety",
+            "routing",
+            "agentTools",
+            "logs",
+            "settings",
+          ].includes(page.kind)
+            ? "overflow-hidden"
+            : "overflow-y-auto overscroll-none",
+        )}
+        data-page={page.kind}
+        data-slot="workspace"
+      >
+        {page.kind === "overview" ? (
+          <Overview
+            catalog={catalog}
+            copyError={copyError}
+            copyFeedback={copyFeedback}
+            isNativeApp={isNativeApp}
+            isReady={isReady}
+            isRestarting={isRestarting}
+            onAddService={() => navigate({ kind: "create" })}
+            onCopy={(value, label) => void copyValue(value, label)}
+            onManageServices={() => navigate({ kind: "list" })}
+            onManageTokens={() => navigate({ kind: "tokens" })}
+            onOpenService={(serviceId) => navigate({ kind: "edit", serviceId })}
+            onRefreshServices={() => void refreshServices()}
+            onRefreshUsage={() => void refreshUsage()}
+            onRestart={() => void handleRestart()}
+            onUsagePresetChange={setUsagePreset}
+            snapshot={snapshot}
+            tokenCatalog={tokenCatalog}
+            usage={usage}
+            usagePreset={usagePreset}
+          />
+        ) : page.kind === "tokens" ? (
+          <AccessTokenManager
+            catalog={tokenCatalog}
+            coreSessionKey={coreSessionKey}
+            inferenceURL={snapshot?.ready?.inference_url ?? ""}
+            isReady={isReady}
+            onRefresh={() => void refreshAccessTokens()}
+            onTokenCreated={handleTokenCreated}
+            onTokenDeleted={handleTokenDeleted}
+          />
+        ) : page.kind === "safety" ? (
+          <SafetyPolicy coreSessionKey={coreSessionKey} isReady={isReady} />
+        ) : page.kind === "records" ? (
+          <RequestRecords
+            coreSessionKey={coreSessionKey}
+            services={catalog.items}
+            isReady={isReady}
+          />
+        ) : page.kind === "routing" ? (
+          <RouteManager
+            coreSessionKey={coreSessionKey}
+            services={catalog.items}
+            isReady={isReady}
+            onDirtyChange={handleEditorDirtyChange}
+            onManageServices={() => navigate({ kind: "list" })}
+            protocols={protocols}
+          />
+        ) : page.kind === "agentTools" ? (
+          <AgentDebugSettings />
+        ) : page.kind === "logs" ? (
+          <AppLogs />
+        ) : page.kind === "settings" ? (
+          <SettingsCenter
+            onCoreSnapshot={setSnapshot}
+            onDirtyChange={handleEditorDirtyChange}
+            snapshot={snapshot}
+          />
+        ) : (
+          <ServiceManager
+            catalogError={catalog.error}
+            catalogStatus={catalog.status}
+            conversionEngine={snapshot?.capabilities?.conversion_engine}
+            isReady={isReady}
+            onDirtyChange={handleEditorDirtyChange}
+            onRefresh={() => void refreshServices()}
+            onServiceRemoved={handleServiceRemoved}
+            onServiceSaved={handleServiceSaved}
+            onViewChange={(next) => navigate(next)}
+            protocols={protocols}
+            services={catalog.items}
+            view={page}
+          />
+        )}
+      </main>
       <ConfirmDialog
         cancelLabel={t("common.continueEditing")}
         confirmLabel={t("common.discardAndLeave")}
-        description={
-          <p>
-              {t("app.unsavedBody")}
-          </p>
-        }
+        description={<p>{t("app.unsavedBody")}</p>}
         onCancel={() => setPendingPage(null)}
         onConfirm={confirmPendingNavigation}
         open={pendingPage !== null}

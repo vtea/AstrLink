@@ -1,3 +1,10 @@
+import { ServiceProxyFields } from "./components/ServiceProxyFields";
+import {
+  proxyDraft,
+  proxyInput,
+  validProxyDraft,
+  type ProxyDraft,
+} from "./service-proxy-model";
 import { ServiceTestDialog } from "./ServiceTestDialog";
 import { PricingWorkspace, ServiceBillingMeter } from "./PricingWorkspace";
 import { useServiceOrder } from "./use-service-order";
@@ -57,7 +64,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { RadioGroup } from "@/components/ui/radio-group";
 import {
   Select,
   SelectContent,
@@ -144,10 +151,18 @@ import {
   type SubscriptionUsage,
 } from "./subscription-usage-model";
 
+/** Tabs of the service editor; `models` is the per-provider model list. */
+export type ServiceEditorTab = "connection" | "models" | "protocols" | "failure";
+
 export type ServiceManagerView =
   | { kind: "list" }
   | { kind: "create" }
-  | { kind: "edit"; serviceId: string };
+  | {
+      kind: "edit";
+      serviceId: string;
+      /** Editor tab to land on; defaults to the connection tab. */
+      tab?: ServiceEditorTab;
+    };
 
 export type ServiceCatalogStatus = "blocked" | "loading" | "ready" | "error";
 
@@ -167,6 +182,7 @@ export interface ServiceManagerProps {
 }
 
 type Draft = {
+  proxy: ProxyDraft;
   failurePolicy?: FailurePolicy;
   kind: ServiceKind;
   name: string;
@@ -194,7 +210,7 @@ type AuthorizationDialog = {
   session: AuthorizationSession;
 };
 
-type EditorTab = "connection" | "models" | "protocols" | "failure";
+type EditorTab = ServiceEditorTab;
 type ServiceFilter = "all" | "enabled" | "disabled";
 
 function serviceTypeOptionLabel(kind: ServiceKind): string {
@@ -229,12 +245,16 @@ function subscriptionOauthLabel(kind: ServiceKind): string {
 }
 
 function subscriptionAccountLabel(kind: ServiceKind, hint: string): string {
-  if (kind === "claude_subscription") return i18n.t("services.claudeAccount", { hint });
-  if (kind === "grok_subscription") return i18n.t("services.xaiAccount", { hint });
+  if (kind === "claude_subscription")
+    return i18n.t("services.claudeAccount", { hint });
+  if (kind === "grok_subscription")
+    return i18n.t("services.xaiAccount", { hint });
   return i18n.t("services.openaiAccount", { hint });
 }
 
-function deviceCodeDescription(provider: SubscriptionProvider | undefined): string {
+function deviceCodeDescription(
+  provider: SubscriptionProvider | undefined,
+): string {
   return provider === "xai_grok"
     ? i18n.t("services.grokDeviceCodeDescription")
     : i18n.t("services.deviceCodeDescription");
@@ -299,15 +319,13 @@ function draftForKind(
       headerName: "",
       secret: "",
       removeCredential: false,
+      proxy: proxyDraft(),
       models: [],
       capabilities: [],
       authorizationFlow: defaultAuthorizationFlow(kind),
     };
   }
-  const preset = httpServicePreset(
-    kind as HTTPServicePresetID,
-    protocols,
-  );
+  const preset = httpServicePreset(kind as HTTPServicePresetID, protocols);
   return {
     kind,
     name: preset.defaultName,
@@ -318,6 +336,7 @@ function draftForKind(
     headerName: preset.headerName,
     secret: "",
     removeCredential: false,
+    proxy: proxyDraft(),
     models: [...(preset.models ?? [])],
     capabilities: preset.capabilities.map((capability) => ({ ...capability })),
     authorizationFlow: null,
@@ -330,6 +349,7 @@ function draftFromRecord(record: ServiceRecord): Draft {
     return {
       ...draftForKind(service.kind, []),
       name: service.name,
+      proxy: proxyDraft(service.proxy),
       failurePolicy: service.failure_policy,
       enabled: service.enabled,
       responsesWebSocket: responsesWebSocketEnabled(service),
@@ -340,7 +360,8 @@ function draftFromRecord(record: ServiceRecord): Draft {
   return {
     kind: service.kind,
     name: service.name,
-      failurePolicy: service.failure_policy,
+    proxy: proxyDraft(service.proxy),
+    failurePolicy: service.failure_policy,
     enabled: service.enabled,
     responsesWebSocket: responsesWebSocketEnabled(service),
     baseURL: service.http.base_url,
@@ -383,6 +404,7 @@ function validateDraft(
   draft: Draft,
   editing: ServiceRecord | null,
 ): string | null {
+  if (!validProxyDraft(draft.proxy)) return i18n.t("serviceProxy.invalid");
   if (draft.name.trim().length === 0 || [...draft.name.trim()].length > 128) {
     return i18n.t("services.nameInvalid");
   }
@@ -390,7 +412,9 @@ function validateDraft(
     return i18n.t("services.tooManyModels");
   }
   if (
-    draft.models.some((model) => [...model].length < 1 || [...model].length > 256) ||
+    draft.models.some(
+      (model) => [...model].length < 1 || [...model].length > 256,
+    ) ||
     new Set(draft.models).size !== draft.models.length
   ) {
     return i18n.t("services.modelIdsInvalid");
@@ -433,7 +457,9 @@ function validateDraft(
   return null;
 }
 
-function serviceDot(service: Service): "positive" | "pending" | "negative" | "neutral" {
+function serviceDot(
+  service: Service,
+): "positive" | "pending" | "negative" | "neutral" {
   if (!service.enabled) return "neutral";
   const status = service.subscription?.status;
   if (!status || status === "connected") return "positive";
@@ -527,7 +553,9 @@ function ModelPreviewDialog({
                 }}
                 type="button"
               >
-                {hasQuery ? t("services.clearMatches") : t("services.selectNone")}
+                {hasQuery
+                  ? t("services.clearMatches")
+                  : t("services.selectNone")}
               </Button>
             </div>
           </div>
@@ -539,18 +567,24 @@ function ModelPreviewDialog({
             <p>{t("models.noMatch", { query: query.trim() })}</p>
           ) : (
             filtered.map((model) => (
-              <Label className="flex items-center gap-2 rounded-lg border px-2 py-1.5" key={model}>
+              <Label
+                className="flex items-center gap-2 rounded-lg border px-2 py-1.5"
+                key={model}
+              >
                 <Checkbox
                   checked={selectedSet.has(model)}
                   onCheckedChange={(checked) => {
-                    const selected = checked === true
-                      ? [...new Set([...preview.selected, model])].sort()
-                      : preview.selected.filter((item) => item !== model);
+                    const selected =
+                      checked === true
+                        ? [...new Set([...preview.selected, model])].sort()
+                        : preview.selected.filter((item) => item !== model);
                     onSelectedChange(selected);
                   }}
                 />
                 <ModelBrandIcon model={model} />
-                <code className="min-w-0 truncate font-mono text-xs">{encodeModelEditorValue(model)}</code>
+                <code className="min-w-0 truncate font-mono text-xs">
+                  {encodeModelEditorValue(model)}
+                </code>
               </Label>
             ))
           )}
@@ -595,7 +629,11 @@ export function ServiceManager({
   onDirtyChange,
 }: ServiceManagerProps) {
   const routingDefaults = useRoutingDefaults(isReady);
-  const serviceOrder = useServiceOrder(services, isReady && view.kind === "list" && catalogStatus === "ready", onRefresh);
+  const serviceOrder = useServiceOrder(
+    services,
+    isReady && view.kind === "list" && catalogStatus === "ready",
+    onRefresh,
+  );
   const t = useT();
   const descriptors = useMemo(
     () => protocolDescriptors(protocols),
@@ -620,7 +658,10 @@ export function ServiceManager({
   const [authorizationDialog, setAuthorizationDialog] =
     useState<AuthorizationDialog | null>(null);
   const [authorizationCode, setAuthorizationCode] = useState("");
-  useEffect(() => setAuthorizationCode(""), [authorizationDialog?.session.id, authorizationDialog?.session.status]);
+  useEffect(
+    () => setAuthorizationCode(""),
+    [authorizationDialog?.session.id, authorizationDialog?.session.status],
+  );
   const [modelEditor, setModelEditor] = useState("");
   const [probingModels, setProbingModels] = useState(false);
   const [modelPreview, setModelPreview] = useState<ModelPreview | null>(null);
@@ -629,7 +670,11 @@ export function ServiceManager({
   const [usageByService, setUsageByService] = useState<
     Record<
       string,
-      { status: SubscriptionUsageStatus; usage?: SubscriptionUsage; error?: string }
+      {
+        status: SubscriptionUsageStatus;
+        usage?: SubscriptionUsage;
+        error?: string;
+      }
     >
   >({});
   const [usageEpoch, setUsageEpoch] = useState(0);
@@ -643,6 +688,7 @@ export function ServiceManager({
   protocolsRef.current = protocols;
   const viewKind = view.kind;
   const editingServiceID = view.kind === "edit" ? view.serviceId : null;
+  const requestedEditorTab = view.kind === "edit" ? (view.tab ?? "connection") : "connection";
   const connectedUsageIDs = useMemo(
     () =>
       services
@@ -661,7 +707,11 @@ export function ServiceManager({
     setUsageByService((current) => {
       const next: Record<
         string,
-        { status: SubscriptionUsageStatus; usage?: SubscriptionUsage; error?: string }
+        {
+          status: SubscriptionUsageStatus;
+          usage?: SubscriptionUsage;
+          error?: string;
+        }
       > = {};
       for (const id of ids) {
         next[id] = { status: "loading", usage: current[id]?.usage };
@@ -688,7 +738,11 @@ export function ServiceManager({
           if (usageGeneration.current !== generation) return;
           setUsageByService((current) => ({
             ...current,
-            [id]: { status: "error", usage: current[id]?.usage, error: message },
+            [id]: {
+              status: "error",
+              usage: current[id]?.usage,
+              error: message,
+            },
           }));
         }
       }),
@@ -711,7 +765,7 @@ export function ServiceManager({
     setModelEditor("");
     setModelPreview(null);
     setModelPreviewQuery("");
-    setEditorTab("connection");
+    setEditorTab(requestedEditorTab);
     if (view.kind === "list") {
       setEditing(null);
       setBaseline(null);
@@ -743,7 +797,7 @@ export function ServiceManager({
       .finally(() => {
         if (loadGeneration.current === generation) setLoadingRecord(false);
       });
-  }, [editingServiceID, t, viewKind]);
+  }, [editingServiceID, requestedEditorTab, t, viewKind]);
 
   const importCodexModelsAfterLogin = useCallback(
     async (service: Service) => {
@@ -774,7 +828,7 @@ export function ServiceManager({
             ? t("services.loggedInNone", { name: service.name })
             : t("services.loggedInFetched", {
                 name: service.name,
-      failurePolicy: service.failure_policy,
+                failurePolicy: service.failure_policy,
                 count: merged.length,
               }),
         );
@@ -969,14 +1023,15 @@ export function ServiceManager({
       setError(t("services.saveBeforeFetch"));
       return;
     }
-    const discoveryProtocols: ModelDiscoveryProtocol[] =
-      isSubscriptionKind(draft.kind)
-        ? ["openai.models"]
-        : (["openai.models", "google.models"] as const).filter((protocol) =>
-            draft.capabilities.some(
-              (capability) => capability.protocol === protocol,
-            ),
-          );
+    const discoveryProtocols: ModelDiscoveryProtocol[] = isSubscriptionKind(
+      draft.kind,
+    )
+      ? ["openai.models"]
+      : (["openai.models", "google.models"] as const).filter((protocol) =>
+          draft.capabilities.some(
+            (capability) => capability.protocol === protocol,
+          ),
+        );
     if (discoveryProtocols.length === 0) {
       setError(t("services.enableDiscovery"));
       return;
@@ -990,6 +1045,9 @@ export function ServiceManager({
             return probeServiceModels(editing!.service.id, protocol);
           }
           return probeDraftServiceModels({
+            ...(draft.proxy.mode !== "inherit" || editing?.service.proxy
+              ? { proxy: proxyInput(draft.proxy) }
+              : {}),
             ...(editing ? { service_id: editing.service.id } : {}),
             kind: draft.kind as HTTPServiceKind,
             http: {
@@ -1071,7 +1129,12 @@ export function ServiceManager({
 
   const submit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    try { if (draft.failurePolicy) parseFailurePolicy(draft.failurePolicy); } catch { setError(t("failure.invalid")); return; }
+    try {
+      if (draft.failurePolicy) parseFailurePolicy(draft.failurePolicy);
+    } catch {
+      setError(t("failure.invalid"));
+      return;
+    }
     const issue = validateDraft(draft, editing);
     if (issue) {
       setError(issue);
@@ -1083,6 +1146,9 @@ export function ServiceManager({
       let record: ServiceRecord;
       if (editing) {
         const patch: ServicePatchInput = {
+          ...(draft.proxy.mode !== "inherit" || editing?.service.proxy
+            ? { proxy: proxyInput(draft.proxy) }
+            : {}),
           name: draft.name.trim(),
           enabled: draft.enabled,
           responses_websocket_enabled: draft.responsesWebSocket,
@@ -1107,21 +1173,31 @@ export function ServiceManager({
         let input: ServiceCreateInput;
         if (isSubscriptionKind(draft.kind)) {
           input = {
+            ...(draft.proxy.mode !== "inherit"
+              ? { proxy: proxyInput(draft.proxy) }
+              : {}),
             name: draft.name.trim(),
             kind: draft.kind,
             enabled: draft.enabled,
             responses_websocket_enabled: draft.responsesWebSocket,
             models: draft.models,
-          ...(draft.failurePolicy ? { failure_policy: draft.failurePolicy } : {}),
+            ...(draft.failurePolicy
+              ? { failure_policy: draft.failurePolicy }
+              : {}),
           };
         } else {
           input = {
+            ...(draft.proxy.mode !== "inherit"
+              ? { proxy: proxyInput(draft.proxy) }
+              : {}),
             name: draft.name.trim(),
             kind: draft.kind as HTTPServiceKind,
             enabled: draft.enabled,
             responses_websocket_enabled: draft.responsesWebSocket,
             models: draft.models,
-          ...(draft.failurePolicy ? { failure_policy: draft.failurePolicy } : {}),
+            ...(draft.failurePolicy
+              ? { failure_policy: draft.failurePolicy }
+              : {}),
             http: {
               base_url: draft.baseURL.trim(),
               auth: authForDraft(draft),
@@ -1206,7 +1282,10 @@ export function ServiceManager({
     setError(null);
     try {
       const session = await getServiceAuthorization(service.id);
-      if (session.flow === "device_code" || session.flow === "authorization_code") {
+      if (
+        session.flow === "device_code" ||
+        session.flow === "authorization_code"
+      ) {
         setAuthorizationDialog({
           service,
           requestedFlow: session.flow,
@@ -1223,7 +1302,9 @@ export function ServiceManager({
   };
 
   const reopenAuthorizationPage = async () => {
-    const url = authorizationDialog?.session.device_code?.verification_url ?? authorizationDialog?.session.authorization_url;
+    const url =
+      authorizationDialog?.session.device_code?.verification_url ??
+      authorizationDialog?.session.authorization_url;
     if (!url) return;
     setError(null);
     try {
@@ -1311,9 +1392,10 @@ export function ServiceManager({
       (service) =>
         (serviceFilter === "all" ||
           service.enabled === (serviceFilter === "enabled")) &&
-        (!modelSearch || service.models.some((model) =>
-          model.toLocaleLowerCase().includes(modelSearch),
-        )) &&
+        (!modelSearch ||
+          service.models.some((model) =>
+            model.toLocaleLowerCase().includes(modelSearch),
+          )) &&
         [
           service.name,
           serviceKindLabel(service.kind),
@@ -1343,17 +1425,16 @@ export function ServiceManager({
           className="@max-[360px]:gap-2"
           actions={
             <>
-              <Button
-                aria-label={t("services.add")}
-                disabled={!isReady || busy}
-                onClick={() => onViewChange({ kind: "create" })}
-                size="sm"
-                type="button"
-              >
-                <Plus aria-hidden="true" />
-                <span className="@max-[480px]:hidden">{t("services.add")}</span>
-                <span className="hidden @max-[480px]:inline">{t("overview.add")}</span>
-              </Button>
+              <ServiceOrderHelp ready={isReady && catalogStatus === "ready"}>
+                <p>{t("services.orderHint")}</p>
+                {filtered ? (
+                  <p className="mt-2">{t("services.orderFiltered")}</p>
+                ) : null}
+                {routingDefaults.loaded &&
+                !routingDefaults.allow_unmatched_failover ? (
+                  <p className="mt-2">{t("failure.globalOffHint")}</p>
+                ) : null}
+              </ServiceOrderHelp>
               <IconButton
                 label={
                   busy ? t("common.refreshing") : t("services.refreshList")
@@ -1374,11 +1455,19 @@ export function ServiceManager({
                   )}
                 />
               </IconButton>
-              <ServiceOrderHelp ready={isReady && catalogStatus === "ready"}>
-                <p>{t("services.orderHint")}</p>
-                {filtered ? <p className="mt-2">{t("services.orderFiltered")}</p> : null}
-                {routingDefaults.loaded && !routingDefaults.allow_unmatched_failover ? <p className="mt-2">{t("failure.globalOffHint")}</p> : null}
-              </ServiceOrderHelp>
+              <Button
+                aria-label={t("services.add")}
+                disabled={!isReady || busy}
+                onClick={() => onViewChange({ kind: "create" })}
+                size="sm"
+                type="button"
+              >
+                <Plus aria-hidden="true" />
+                <span className="@max-[480px]:hidden">{t("services.add")}</span>
+                <span className="hidden @max-[480px]:inline">
+                  {t("overview.add")}
+                </span>
+              </Button>
             </>
           }
           title={t("services.title")}
@@ -1450,9 +1539,20 @@ export function ServiceManager({
           />
         </div>
         <p className="sr-only" aria-live="polite">
-          {serviceOrder.saving ? t("services.orderSaving") : filtered ? t("services.orderFiltered") : ""}
+          {serviceOrder.saving
+            ? t("services.orderSaving")
+            : filtered
+              ? t("services.orderFiltered")
+              : ""}
         </p>
-        {serviceOrder.error ? <FormMessage className="mb-3" tone="error">{serviceOrder.error}<Button type="button" variant="ghost" onClick={serviceOrder.reload}>{t("common.retry")}</Button></FormMessage> : null}
+        {serviceOrder.error ? (
+          <FormMessage className="mb-3" tone="error">
+            {serviceOrder.error}
+            <Button type="button" variant="ghost" onClick={serviceOrder.reload}>
+              {t("common.retry")}
+            </Button>
+          </FormMessage>
+        ) : null}
         <div
           className="flex min-h-0 min-w-0 flex-1 flex-col"
           aria-label={t("services.listLabel")}
@@ -1513,258 +1613,326 @@ export function ServiceManager({
                     }
                   />
                 ) : null}
-                <OrderedList items={visibleServices} label={t("services.orderLabel")} compact
-                  disabled={!isReady || busy || serviceOrder.saving || !serviceOrder.complete}
-                  positionOf={service => serviceOrder.ordered.findIndex(item => item.id === service.id) + 1}
-                  onChange={items => void serviceOrder.save(items)}>
-                {(service, _index, controls, sorting) => {
-                  const subscription = service.subscription;
-                  const acting = actionID === service.id;
-                  const plan = planTypeLabel(
-                    usageByService[service.id]?.usage?.plan_type,
-                  );
-                  const tone = serviceDot(service);
-                  return (
-                    <ServiceListRow
-                      key={service.id}
-                      name={service.name}
-                      order={controls}
-                      sorting={sorting}
-                      sortIcon={<ServiceKindIcon kind={service.kind} size={20} />}
-                      sortStatus={<StatusDot label={serviceStatusLabel(service)} tone={tone} />}
-                      identity={
-                        <div className="flex min-w-0 items-center gap-3">
-                          <span className="flex size-9 shrink-0 items-center justify-center rounded-md border bg-background">
-                            <ServiceKindIcon kind={service.kind} size={24} />
-                          </span>
-                          <div className="grid min-w-0 gap-0.5">
-                            <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-                              <Button
-                                className="block h-auto min-w-0 max-w-full shrink truncate rounded-sm p-0 text-left text-sm font-semibold"
-                                disabled={acting}
-                                onClick={() =>
-                                  onViewChange({
-                                    kind: "edit",
-                                    serviceId: service.id,
-                                  })
-                                }
-                                title={service.name}
-                                type="button"
-                                variant="link"
-                              >
-                                {service.name}
-                              </Button>
-                              {plan ? (
-                                <Badge
-                                  data-testid="subscription-plan"
-                                  variant="secondary"
+                <OrderedList
+                  items={visibleServices}
+                  label={t("services.orderLabel")}
+                  compact
+                  disabled={
+                    !isReady ||
+                    busy ||
+                    serviceOrder.saving ||
+                    !serviceOrder.complete
+                  }
+                  positionOf={(service) =>
+                    serviceOrder.ordered.findIndex(
+                      (item) => item.id === service.id,
+                    ) + 1
+                  }
+                  onChange={(items) => void serviceOrder.save(items)}
+                >
+                  {(service, _index, controls, sorting) => {
+                    const subscription = service.subscription;
+                    const acting = actionID === service.id;
+                    const plan = planTypeLabel(
+                      usageByService[service.id]?.usage?.plan_type,
+                      subscription?.provider,
+                    );
+                    const tone = serviceDot(service);
+                    return (
+                      <ServiceListRow
+                        key={service.id}
+                        name={service.name}
+                        order={controls}
+                        sorting={sorting}
+                        sortIcon={
+                          <ServiceKindIcon kind={service.kind} size={20} />
+                        }
+                        sortStatus={
+                          <StatusDot
+                            label={serviceStatusLabel(service)}
+                            tone={tone}
+                          />
+                        }
+                        identity={
+                          <div className="flex min-w-0 items-center gap-3">
+                            <span className="flex size-9 shrink-0 items-center justify-center rounded-md border bg-background">
+                              <ServiceKindIcon kind={service.kind} size={24} />
+                            </span>
+                            <div className="grid min-w-0 gap-0.5">
+                              <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+                                <Button
+                                  className="block h-auto min-w-0 max-w-full shrink truncate rounded-sm p-0 text-left text-sm font-semibold"
+                                  disabled={acting}
+                                  onClick={() =>
+                                    onViewChange({
+                                      kind: "edit",
+                                      serviceId: service.id,
+                                    })
+                                  }
+                                  title={service.name}
+                                  type="button"
+                                  variant="link"
                                 >
-                                  {plan}
-                                </Badge>
-                              ) : null}
+                                  {service.name}
+                                </Button>
+                                {plan ? (
+                                  <Badge
+                                    data-testid="subscription-plan"
+                                    variant="secondary"
+                                  >
+                                    {plan}
+                                  </Badge>
+                                ) : null}
+                              </div>
+                              <span className="text-micro text-muted-foreground">
+                                {serviceKindLabel(service.kind)}
+                              </span>
+                              <span
+                                className="block truncate text-xs text-text-secondary"
+                                title={
+                                  service.http?.base_url ??
+                                  subscription?.account_hint
+                                }
+                              >
+                                {service.http?.base_url ??
+                                  (subscription?.account_hint
+                                    ? subscriptionAccountLabel(
+                                        service.kind,
+                                        subscription.account_hint,
+                                      )
+                                    : subscriptionOauthLabel(service.kind))}
+                              </span>
                             </div>
-                            <span className="text-micro text-muted-foreground">
-                              {serviceKindLabel(service.kind)}
-                            </span>
-                            <span
-                              className="block truncate text-xs text-text-secondary"
-                              title={
-                                service.http?.base_url ??
-                                subscription?.account_hint
-                              }
-                            >
-                              {service.http?.base_url ??
-                                (subscription?.account_hint
-                                  ? subscriptionAccountLabel(service.kind, subscription.account_hint)
-                                  : subscriptionOauthLabel(service.kind))}
-                            </span>
                           </div>
-                        </div>
-                      }
-                      inventory={
-                        <>
-                          <span className="text-xs font-medium tabular-nums">
-                            {t("services.modelCount", {
-                              count: service.models.length,
-                            })}
-                          </span>
-                          <span className="inline-flex items-center gap-1.5 text-micro text-muted-foreground tabular-nums">
-                            {t("services.apiCount", {
-                              count: service.capabilities.length,
-                            })}
-                            {supportsResponsesWebSocket(service) && responsesWebSocketEnabled(service) ? (
-                              <CapabilityIndicator label={t("services.webSocketOn")}>
-                                <Cable aria-hidden="true" animateOnHover={false} className="size-3" />
-                              </CapabilityIndicator>
-                            ) : null}
-                          </span>
-                        </>
-                      }
-                      usage={
-                        <div className="grid gap-1">
-                          {hasPlanUsage(service) ? (
-                            <SubscriptionUsageMeter
-                              error={usageByService[service.id]?.error}
-                              now={new Date()}
-                              onReset={() =>
-                                setConfirmAction({
-                                  kind: "reset-usage",
-                                  service,
-                                  availableCount:
-                                    usageByService[service.id]?.usage
-                                      ?.rate_limit_reset_credits
-                                      ?.available_count ?? 0,
+                        }
+                        inventory={
+                          <>
+                            <Button
+                              aria-label={t("services.openModels", {
+                                name: service.name,
+                              })}
+                              className="block h-auto w-fit rounded-sm p-0 text-left text-xs font-medium tabular-nums"
+                              disabled={acting}
+                              onClick={() =>
+                                onViewChange({
+                                  kind: "edit",
+                                  serviceId: service.id,
+                                  tab: "models",
                                 })
                               }
-                              resetting={actionID === service.id}
-                              status={
-                                usageByService[service.id]?.status ?? "loading"
+                              type="button"
+                              variant="link"
+                            >
+                              {t("services.modelCount", {
+                                count: service.models.length,
+                              })}
+                            </Button>
+                            <span className="inline-flex items-center gap-1.5 text-micro text-muted-foreground tabular-nums">
+                              {t("services.apiCount", {
+                                count: service.capabilities.length,
+                              })}
+                              {supportsResponsesWebSocket(service) &&
+                              responsesWebSocketEnabled(service) ? (
+                                <CapabilityIndicator
+                                  label={t("services.webSocketOn")}
+                                >
+                                  <Cable
+                                    aria-hidden="true"
+                                    animateOnHover={false}
+                                    className="size-3"
+                                  />
+                                </CapabilityIndicator>
+                              ) : null}
+                            </span>
+                          </>
+                        }
+                        usage={
+                          <div className="grid gap-1">
+                            {hasPlanUsage(service) ? (
+                              <SubscriptionUsageMeter
+                                error={usageByService[service.id]?.error}
+                                now={new Date()}
+                                onReset={() =>
+                                  setConfirmAction({
+                                    kind: "reset-usage",
+                                    service,
+                                    availableCount:
+                                      usageByService[service.id]?.usage
+                                        ?.rate_limit_reset_credits
+                                        ?.available_count ?? 0,
+                                  })
+                                }
+                                resetting={actionID === service.id}
+                                status={
+                                  usageByService[service.id]?.status ??
+                                  "loading"
+                                }
+                                usage={usageByService[service.id]?.usage}
+                              />
+                            ) : null}
+                            <ServiceBillingMeter
+                              serviceId={service.id}
+                              ready={isReady}
+                              epoch={usageEpoch}
+                              observedAt={
+                                usageByService[service.id]?.usage?.fetched_at
                               }
-                              usage={usageByService[service.id]?.usage}
+                              onOpen={() => setBillingService(service.id)}
                             />
-                          ) : null}
-                          <ServiceBillingMeter
-                            serviceId={service.id}
-                            ready={isReady}
-                            epoch={usageEpoch}
-                            observedAt={usageByService[service.id]?.usage?.fetched_at}
-                            onOpen={() => setBillingService(service.id)}
-                          />
-                        </div>
-                      }
-                      status={
-                        <>
-                          <StatusDot label={serviceStatusLabel(service)} tone={tone} />
-                          <Switch
-                            aria-label={t("services.enableNamed", {
-                              name: service.name,
-                            })}
-                            checked={service.enabled}
-                            disabled={!isReady || acting}
-                            onCheckedChange={() => void toggleEnabled(service)}
-                            size="sm"
-                          />
-                        </>
-                      }
-                      actions={
-                        <>
-                          <IconButton
-                            label={t("serviceTest.testNamed", { name: service.name })}
-                            disabled={!isReady || acting}
-                            onClick={() => setTestingService(service)}
-                            type="button"
-                          >
-                            <Flask aria-hidden="true" />
-                          </IconButton>
-                          <IconButton
-                            label={t("services.editNamed", {
-                              name: service.name,
-                            })}
-                            disabled={acting}
-                            onClick={() =>
-                              onViewChange({
-                                kind: "edit",
-                                serviceId: service.id,
-                              })
-                            }
-                            type="button"
-                          >
-                            <Pencil aria-hidden="true" />
-                          </IconButton>
-                          <DropdownMenu>
-                            <DropdownMenuTrigger asChild>
-                              <IconButton
-                                label={t("services.moreNamed", {
-                                  name: service.name,
-                                })}
-                                disabled={acting}
-                                size="icon-sm"
-                                type="button"
-                              >
-                                <Ellipsis aria-hidden="true" />
-                              </IconButton>
-                            </DropdownMenuTrigger>
-                            <DropdownMenuContent align="end">
-                              {subscription ? (
-                                subscription.status === "authorizing" ? (
-                                  <>
+                          </div>
+                        }
+                        status={
+                          <>
+                            <StatusDot
+                              label={serviceStatusLabel(service)}
+                              tone={tone}
+                            />
+                            <Switch
+                              aria-label={t("services.enableNamed", {
+                                name: service.name,
+                              })}
+                              checked={service.enabled}
+                              disabled={!isReady || acting}
+                              onCheckedChange={() =>
+                                void toggleEnabled(service)
+                              }
+                              size="sm"
+                            />
+                          </>
+                        }
+                        actions={
+                          <>
+                            <IconButton
+                              label={t("serviceTest.testNamed", {
+                                name: service.name,
+                              })}
+                              disabled={!isReady || acting}
+                              onClick={() => setTestingService(service)}
+                              type="button"
+                            >
+                              <Flask aria-hidden="true" />
+                            </IconButton>
+                            <IconButton
+                              label={t("services.editNamed", {
+                                name: service.name,
+                              })}
+                              disabled={acting}
+                              onClick={() =>
+                                onViewChange({
+                                  kind: "edit",
+                                  serviceId: service.id,
+                                })
+                              }
+                              type="button"
+                            >
+                              <Pencil aria-hidden="true" />
+                            </IconButton>
+                            <DropdownMenu>
+                              <DropdownMenuTrigger asChild>
+                                <IconButton
+                                  label={t("services.moreNamed", {
+                                    name: service.name,
+                                  })}
+                                  disabled={acting}
+                                  size="icon-sm"
+                                  type="button"
+                                >
+                                  <Ellipsis aria-hidden="true" />
+                                </IconButton>
+                              </DropdownMenuTrigger>
+                              <DropdownMenuContent align="end">
+                                {subscription ? (
+                                  subscription.status === "authorizing" ? (
+                                    <>
+                                      <DropdownMenuItem
+                                        disabled={acting}
+                                        onSelect={() =>
+                                          void showAuthorization(service)
+                                        }
+                                      >
+                                        {acting
+                                          ? t("common.processing")
+                                          : t("services.viewLogin")}
+                                      </DropdownMenuItem>
+                                      <DropdownMenuItem
+                                        disabled={acting}
+                                        onSelect={() =>
+                                          void cancelAuthorization(service)
+                                        }
+                                      >
+                                        {t("services.cancelLogin")}
+                                      </DropdownMenuItem>
+                                    </>
+                                  ) : (
                                     <DropdownMenuItem
                                       disabled={acting}
-                                      onSelect={() =>
-                                        void showAuthorization(service)
-                                      }
+                                      onSelect={() => {
+                                        setLoginChoice(service);
+                                        setLoginChoiceFlow(
+                                          defaultAuthorizationFlow(
+                                            service.kind,
+                                          ),
+                                        );
+                                        setError(null);
+                                      }}
                                     >
                                       {acting
                                         ? t("common.processing")
-                                        : t("services.viewLogin")}
+                                        : subscription.status === "connected"
+                                          ? t("services.resignIn")
+                                          : t("services.signIn")}
                                     </DropdownMenuItem>
-                                    <DropdownMenuItem
-                                      disabled={acting}
-                                      onSelect={() =>
-                                        void cancelAuthorization(service)
-                                      }
-                                    >
-                                      {t("services.cancelLogin")}
-                                    </DropdownMenuItem>
-                                  </>
-                                ) : (
+                                  )
+                                ) : null}
+                                {subscription?.status === "connected" ? (
                                   <DropdownMenuItem
                                     disabled={acting}
-                                    onSelect={() => {
-                                      setLoginChoice(service);
-                                      setLoginChoiceFlow(defaultAuthorizationFlow(service.kind));
-                                      setError(null);
-                                    }}
+                                    onSelect={() =>
+                                      setConfirmAction({
+                                        kind: "logout",
+                                        service,
+                                      })
+                                    }
                                   >
-                                    {acting
-                                      ? t("common.processing")
-                                      : subscription.status === "connected"
-                                        ? t("services.resignIn")
-                                        : t("services.signIn")}
+                                    {t("services.signOut")}
                                   </DropdownMenuItem>
-                                )
-                              ) : null}
-                              {subscription?.status === "connected" ? (
+                                ) : null}
+                                {subscription ? (
+                                  <DropdownMenuSeparator />
+                                ) : null}
                                 <DropdownMenuItem
                                   disabled={acting}
                                   onSelect={() =>
                                     setConfirmAction({
-                                      kind: "logout",
+                                      kind: "delete",
                                       service,
                                     })
                                   }
+                                  variant="destructive"
                                 >
-                                  {t("services.signOut")}
+                                  {acting
+                                    ? t("common.processing")
+                                    : t("common.delete")}
                                 </DropdownMenuItem>
-                              ) : null}
-                              {subscription ? <DropdownMenuSeparator /> : null}
-                              <DropdownMenuItem
-                                disabled={acting}
-                                onSelect={() =>
-                                  setConfirmAction({
-                                    kind: "delete",
-                                    service,
-                                  })
-                                }
-                                variant="destructive"
-                              >
-                                {acting
-                                  ? t("common.processing")
-                                  : t("common.delete")}
-                              </DropdownMenuItem>
-                            </DropdownMenuContent>
-                          </DropdownMenu>
-                        </>
-                      }
-                    />
-                  );
-                }}
+                              </DropdownMenuContent>
+                            </DropdownMenu>
+                          </>
+                        }
+                      />
+                    );
+                  }}
                 </OrderedList>
               </div>
             </>
           )}
         </div>
-        {testingService ? <ServiceTestDialog key={testingService.id} service={testingService} onClose={() => setTestingService(null)} /> : null}
+        {testingService ? (
+          <ServiceTestDialog
+            key={testingService.id}
+            service={testingService}
+            onClose={() => setTestingService(null)}
+          />
+        ) : null}
         <ConfirmDialog
           confirmLabel={
             confirmAction?.kind === "reset-usage"
@@ -1830,25 +1998,35 @@ export function ServiceManager({
               value={loginChoiceFlow ?? ""}
             >
               {loginChoice?.kind === "claude_subscription" ? (
-                <ChoiceCard label={t("services.claudeOauth")} description={t("services.claudeOauthHint")}
-                  selected={loginChoiceFlow === "authorization_code"} value="authorization_code" />
+                <ChoiceCard
+                  label={t("services.claudeOauth")}
+                  description={t("services.claudeOauthHint")}
+                  selected={loginChoiceFlow === "authorization_code"}
+                  value="authorization_code"
+                />
               ) : loginChoice?.kind === "grok_subscription" ? (
-                <ChoiceCard label="Device Code" description={t("services.grokDeviceCodeHint")}
-                  selected={loginChoiceFlow === "device_code"} value="device_code" />
-              ) : <>
-              <ChoiceCard
-                description={t("services.browserOauthHint")}
-                label={t("services.browserOauth")}
-                selected={loginChoiceFlow === "browser"}
-                value="browser"
-              />
-              <ChoiceCard
-                description={t("services.deviceCodeHint")}
-                label="Device Code"
-                selected={loginChoiceFlow === "device_code"}
-                value="device_code"
-              />
-              </>}
+                <ChoiceCard
+                  label="Device Code"
+                  description={t("services.grokDeviceCodeHint")}
+                  selected={loginChoiceFlow === "device_code"}
+                  value="device_code"
+                />
+              ) : (
+                <>
+                  <ChoiceCard
+                    description={t("services.browserOauthHint")}
+                    label={t("services.browserOauth")}
+                    selected={loginChoiceFlow === "browser"}
+                    value="browser"
+                  />
+                  <ChoiceCard
+                    description={t("services.deviceCodeHint")}
+                    label="Device Code"
+                    selected={loginChoiceFlow === "device_code"}
+                    value="device_code"
+                  />
+                </>
+              )}
             </RadioGroup>
             <DialogFooter>
               <Button
@@ -1882,9 +2060,17 @@ export function ServiceManager({
           >
             <DialogContent className="max-w-[460px] sm:max-w-[460px]">
               <DialogHeader>
-                <DialogTitle>{authorizationDialog.session.flow === "authorization_code" ? t("services.claudeOauth") : t("services.deviceCodeTitle")}</DialogTitle>
+                <DialogTitle>
+                  {authorizationDialog.session.flow === "authorization_code"
+                    ? t("services.claudeOauth")
+                    : t("services.deviceCodeTitle")}
+                </DialogTitle>
                 <DialogDescription>
-                  {authorizationDialog.session.flow === "authorization_code" ? t("services.claudeOauthHint") : deviceCodeDescription(authorizationDialog.session.provider)}
+                  {authorizationDialog.session.flow === "authorization_code"
+                    ? t("services.claudeOauthHint")
+                    : deviceCodeDescription(
+                        authorizationDialog.session.provider,
+                      )}
                 </DialogDescription>
               </DialogHeader>
               {authorizationDialog.requestedFlow === "browser" ? (
@@ -1892,37 +2078,90 @@ export function ServiceManager({
                   {t("services.portsBusyAuto")}
                 </FormMessage>
               ) : null}
-              {authorizationDialog.session.status === "pending" && authorizationDialog.session.flow === "authorization_code" ? (
-                <form className="grid gap-4" onSubmit={async (event) => {
-                  event.preventDefault();
-                  const active = authorizationDialog;
-                  setActionID(active.service.id);
-                  setError(null);
-                  const code = authorizationCode;
-                  setAuthorizationCode("");
-                  try {
-                    const session = await completeServiceAuthorization(active.service.id, active.session.id, code);
-                    setAuthorizationDialog((current) => current?.session.id === active.session.id ? { ...current, session } : current);
-                    await onRefresh();
-                  } catch (cause) {
-                    setError(errorMessage(cause, t("services.codeExchangeFailed")));
-                  } finally { setActionID(null); }
-                }}>
-                  <Field htmlFor="claude-authorization-code" label={t("services.authorizationCode")}>
-                    <Input id="claude-authorization-code" aria-label={t("services.authorizationCode")} type="password" autoComplete="off" spellCheck={false}
-                      placeholder="code#state" value={authorizationCode} maxLength={8192}
-                      onChange={(event) => setAuthorizationCode(event.target.value)} />
+              {authorizationDialog.session.status === "pending" &&
+              authorizationDialog.session.flow === "authorization_code" ? (
+                <form
+                  className="grid gap-4"
+                  onSubmit={async (event) => {
+                    event.preventDefault();
+                    const active = authorizationDialog;
+                    setActionID(active.service.id);
+                    setError(null);
+                    const code = authorizationCode;
+                    setAuthorizationCode("");
+                    try {
+                      const session = await completeServiceAuthorization(
+                        active.service.id,
+                        active.session.id,
+                        code,
+                      );
+                      setAuthorizationDialog((current) =>
+                        current?.session.id === active.session.id
+                          ? { ...current, session }
+                          : current,
+                      );
+                      await onRefresh();
+                    } catch (cause) {
+                      setError(
+                        errorMessage(cause, t("services.codeExchangeFailed")),
+                      );
+                    } finally {
+                      setActionID(null);
+                    }
+                  }}
+                >
+                  <Field
+                    htmlFor="claude-authorization-code"
+                    label={t("services.authorizationCode")}
+                  >
+                    <Input
+                      id="claude-authorization-code"
+                      aria-label={t("services.authorizationCode")}
+                      type="password"
+                      autoComplete="off"
+                      spellCheck={false}
+                      placeholder="code#state"
+                      value={authorizationCode}
+                      maxLength={8192}
+                      onChange={(event) =>
+                        setAuthorizationCode(event.target.value)
+                      }
+                    />
                   </Field>
-                  {error ? <FormMessage tone="error">{error}</FormMessage> : null}
+                  {error ? (
+                    <FormMessage tone="error">{error}</FormMessage>
+                  ) : null}
                   <DialogFooter>
-                    <Button variant="outline" type="button" disabled={actionID === authorizationDialog.service.id}
-                      onClick={() => void cancelAuthorization(authorizationDialog.service)}>{t("services.cancelLogin")}</Button>
-                    <Button variant="outline" type="button" onClick={() => void reopenAuthorizationPage()}>{t("services.reopenLogin")}</Button>
-                    <Button type="submit" disabled={!authorizationCode.trim() || actionID === authorizationDialog.service.id}>{t("services.completeLogin")}</Button>
+                    <Button
+                      variant="outline"
+                      type="button"
+                      disabled={actionID === authorizationDialog.service.id}
+                      onClick={() =>
+                        void cancelAuthorization(authorizationDialog.service)
+                      }
+                    >
+                      {t("services.cancelLogin")}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      type="button"
+                      onClick={() => void reopenAuthorizationPage()}
+                    >
+                      {t("services.reopenLogin")}
+                    </Button>
+                    <Button
+                      type="submit"
+                      disabled={
+                        !authorizationCode.trim() ||
+                        actionID === authorizationDialog.service.id
+                      }
+                    >
+                      {t("services.completeLogin")}
+                    </Button>
                   </DialogFooter>
                 </form>
               ) : authorizationDialog.session.status === "pending" &&
-              authorizationDialog.session.device_code ? (
+                authorizationDialog.session.device_code ? (
                 <>
                   <p className="text-sm leading-6 text-muted-foreground">
                     {authorizationDialog.session.provider === "xai_grok"
@@ -2006,13 +2245,9 @@ export function ServiceManager({
 
   const editingKind = editing?.service.kind;
   const canKeepCredential = Boolean(editing?.service.http?.credential_ref);
-  const selectedPreset =
-    isSubscriptionKind(draft.kind)
-      ? null
-      : httpServicePreset(
-          draft.kind as HTTPServicePresetID,
-          protocols,
-        );
+  const selectedPreset = isSubscriptionKind(draft.kind)
+    ? null
+    : httpServicePreset(draft.kind as HTTPServicePresetID, protocols);
   const modelsEditor = (
     <ServiceModelsEditor
       key={editingServiceID ?? "create"}
@@ -2027,8 +2262,11 @@ export function ServiceManager({
         }))
       }
       onDiscoverModels={
-        isSubscriptionKind(draft.kind) || draft.capabilities.some(({ protocol }) =>
-          protocol === "openai.models" || protocol === "google.models")
+        isSubscriptionKind(draft.kind) ||
+        draft.capabilities.some(
+          ({ protocol }) =>
+            protocol === "openai.models" || protocol === "google.models",
+        )
           ? () => void discoverModels()
           : undefined
       }
@@ -2199,23 +2437,36 @@ export function ServiceManager({
               <SelectContent>
                 <SelectGroup>
                   <SelectLabel>{t("services.groupSubscription")}</SelectLabel>
-                  <SelectItem value="codex_subscription" textValue={serviceTypeOptionLabel("codex_subscription")}>
+                  <SelectItem
+                    value="codex_subscription"
+                    textValue={serviceTypeOptionLabel("codex_subscription")}
+                  >
                     <ServiceKindLabel kind="codex_subscription">
                       {serviceTypeOptionLabel("codex_subscription")}
                     </ServiceKindLabel>
                   </SelectItem>
-                  <SelectItem value="claude_subscription" textValue={serviceTypeOptionLabel("claude_subscription")}>
+                  <SelectItem
+                    value="claude_subscription"
+                    textValue={serviceTypeOptionLabel("claude_subscription")}
+                  >
                     <ServiceKindLabel kind="claude_subscription">
                       {serviceTypeOptionLabel("claude_subscription")}
                     </ServiceKindLabel>
                   </SelectItem>
-                  <SelectItem value="grok_subscription" textValue={serviceTypeOptionLabel("grok_subscription")}>
+                  <SelectItem
+                    value="grok_subscription"
+                    textValue={serviceTypeOptionLabel("grok_subscription")}
+                  >
                     <ServiceKindLabel kind="grok_subscription">
                       {serviceTypeOptionLabel("grok_subscription")}
                     </ServiceKindLabel>
                   </SelectItem>
                   {codingPlanPresetIDs.map((kind) => (
-                    <SelectItem key={kind} value={kind} textValue={serviceTypeOptionLabel(kind)}>
+                    <SelectItem
+                      key={kind}
+                      value={kind}
+                      textValue={serviceTypeOptionLabel(kind)}
+                    >
                       <ServiceKindLabel kind={kind}>
                         {serviceTypeOptionLabel(kind)}
                       </ServiceKindLabel>
@@ -2224,7 +2475,10 @@ export function ServiceManager({
                 </SelectGroup>
                 <SelectGroup>
                   <SelectLabel>{t("services.groupGateway")}</SelectLabel>
-                  <SelectItem value="newapi" textValue={serviceTypeOptionLabel("newapi")}>
+                  <SelectItem
+                    value="newapi"
+                    textValue={serviceTypeOptionLabel("newapi")}
+                  >
                     <ServiceKindLabel kind="newapi">
                       {serviceTypeOptionLabel("newapi")}
                     </ServiceKindLabel>
@@ -2233,7 +2487,11 @@ export function ServiceManager({
                 <SelectGroup>
                   <SelectLabel>{t("services.groupPayAsYouGo")}</SelectLabel>
                   {payAsYouGoPresetIDs.map((kind) => (
-                    <SelectItem key={kind} value={kind} textValue={serviceTypeOptionLabel(kind)}>
+                    <SelectItem
+                      key={kind}
+                      value={kind}
+                      textValue={serviceTypeOptionLabel(kind)}
+                    >
                       <ServiceKindLabel kind={kind}>
                         {serviceTypeOptionLabel(kind)}
                       </ServiceKindLabel>
@@ -2243,9 +2501,18 @@ export function ServiceManager({
                 <SelectGroup>
                   <SelectLabel>{t("services.groupAdvanced")}</SelectLabel>
                   {httpServicePresetIDs
-                    .filter((kind) => kind !== "newapi" && !codingPlanPresetIDs.includes(kind) && !payAsYouGoPresetIDs.includes(kind))
+                    .filter(
+                      (kind) =>
+                        kind !== "newapi" &&
+                        !codingPlanPresetIDs.includes(kind) &&
+                        !payAsYouGoPresetIDs.includes(kind),
+                    )
                     .map((kind) => (
-                      <SelectItem key={kind} value={kind} textValue={serviceTypeOptionLabel(kind)}>
+                      <SelectItem
+                        key={kind}
+                        value={kind}
+                        textValue={serviceTypeOptionLabel(kind)}
+                      >
                         <ServiceKindLabel kind={kind}>
                           {serviceTypeOptionLabel(kind)}
                         </ServiceKindLabel>
@@ -2290,9 +2557,17 @@ export function ServiceManager({
           </Label>
           {supportsResponsesWebSocket(draft) ? (
             <div className="border-t pt-4">
-              <CapabilityToggle label={t("services.responsesWebSocket")}
-                description={t("services.responsesWebSocketHint")} checked={draft.responsesWebSocket}
-                onCheckedChange={checked => setDraft(current => ({ ...current, responsesWebSocket: checked }))} />
+              <CapabilityToggle
+                label={t("services.responsesWebSocket")}
+                description={t("services.responsesWebSocketHint")}
+                checked={draft.responsesWebSocket}
+                onCheckedChange={(checked) =>
+                  setDraft((current) => ({
+                    ...current,
+                    responsesWebSocket: checked,
+                  }))
+                }
+              />
             </div>
           ) : null}
         </div>
@@ -2331,25 +2606,35 @@ export function ServiceManager({
                     value={draft.authorizationFlow ?? ""}
                   >
                     {draft.kind === "claude_subscription" ? (
-                      <ChoiceCard label={t("services.claudeOauth")} description={t("services.claudeOauthHint")}
-                        selected value="authorization_code" />
+                      <ChoiceCard
+                        label={t("services.claudeOauth")}
+                        description={t("services.claudeOauthHint")}
+                        selected
+                        value="authorization_code"
+                      />
                     ) : draft.kind === "grok_subscription" ? (
-                      <ChoiceCard label="Device Code" description={t("services.grokDeviceCodeHint")}
-                        selected value="device_code" />
-                    ) : <>
-                    <ChoiceCard
-                      description={t("services.browserOauthCreateHint")}
-                      label={t("services.browserOauth")}
-                      selected={draft.authorizationFlow === "browser"}
-                      value="browser"
-                    />
-                    <ChoiceCard
-                      description={t("services.deviceCodeCreateHint")}
-                      label="Device Code"
-                      selected={draft.authorizationFlow === "device_code"}
-                      value="device_code"
-                    />
-                    </>}
+                      <ChoiceCard
+                        label="Device Code"
+                        description={t("services.grokDeviceCodeHint")}
+                        selected
+                        value="device_code"
+                      />
+                    ) : (
+                      <>
+                        <ChoiceCard
+                          description={t("services.browserOauthCreateHint")}
+                          label={t("services.browserOauth")}
+                          selected={draft.authorizationFlow === "browser"}
+                          value="browser"
+                        />
+                        <ChoiceCard
+                          description={t("services.deviceCodeCreateHint")}
+                          label="Device Code"
+                          selected={draft.authorizationFlow === "device_code"}
+                          value="device_code"
+                        />
+                      </>
+                    )}
                   </RadioGroup>
                   {draft.authorizationFlow === null ? (
                     <small className="mt-2 block text-warning-foreground">
@@ -2486,6 +2771,11 @@ export function ServiceManager({
           )}
         </div>
       </Panel>
+      <ServiceProxyFields
+        value={draft.proxy}
+        onChange={(proxy) => setDraft((current) => ({ ...current, proxy }))}
+        hasCredential={Boolean(editing?.service.proxy?.credential_ref)}
+      />
     </div>
   );
   const visibleEditorTab: EditorTab =
@@ -2592,7 +2882,14 @@ export function ServiceManager({
                     </Badge>
                   </TabsTrigger>
                 )}
-                <TabsTrigger data-testid="service-editor-tab-failure" onClick={() => setEditorTab("failure")} type="button" value="failure">{t("failure.title")}</TabsTrigger>
+                <TabsTrigger
+                  data-testid="service-editor-tab-failure"
+                  onClick={() => setEditorTab("failure")}
+                  type="button"
+                  value="failure"
+                >
+                  {t("failure.title")}
+                </TabsTrigger>
               </TabsList>
               <TabsContent
                 className="min-h-0 min-w-0 flex-1 overflow-y-auto pr-4 pb-1"
@@ -2620,13 +2917,52 @@ export function ServiceManager({
                   {protocolEditor}
                 </TabsContent>
               )}
-              <TabsContent className="min-h-0 min-w-0 flex-1 overflow-y-auto pr-4 pb-1" data-tab-scroller="" data-testid="service-editor-tab-panel" value="failure">
+              <TabsContent
+                className="min-h-0 min-w-0 flex-1 overflow-y-auto pr-4 pb-1"
+                data-tab-scroller=""
+                data-testid="service-editor-tab-panel"
+                value="failure"
+              >
                 <Panel className="mb-3 grid gap-3 p-4">
                   <p className="text-sm">{t("failure.serviceGlobalHint")}</p>
-                  {!routingDefaults.loaded ? <p className="text-xs text-muted-foreground">{t("failure.defaultsUnavailable")}<Button type="button" variant="ghost" onClick={routingDefaults.reload}>{t("common.retry")}</Button></p> : null}
-                  <Label className="flex items-center gap-2"><Switch disabled={!routingDefaults.loaded} checked={draft.failurePolicy !== undefined} onCheckedChange={checked => setDraft(current => ({ ...current, failurePolicy: checked ? structuredClone(routingDefaults.default_failure_policy) : undefined }))} />{t("failure.serviceOverride")}</Label>
+                  {!routingDefaults.loaded ? (
+                    <p className="text-xs text-muted-foreground">
+                      {t("failure.defaultsUnavailable")}
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        onClick={routingDefaults.reload}
+                      >
+                        {t("common.retry")}
+                      </Button>
+                    </p>
+                  ) : null}
+                  <Label className="flex items-center gap-2">
+                    <Switch
+                      disabled={!routingDefaults.loaded}
+                      checked={draft.failurePolicy !== undefined}
+                      onCheckedChange={(checked) =>
+                        setDraft((current) => ({
+                          ...current,
+                          failurePolicy: checked
+                            ? structuredClone(
+                                routingDefaults.default_failure_policy,
+                              )
+                            : undefined,
+                        }))
+                      }
+                    />
+                    {t("failure.serviceOverride")}
+                  </Label>
                 </Panel>
-                {draft.failurePolicy ? <FailurePolicyEditor value={draft.failurePolicy} onChange={failurePolicy => setDraft(current => ({ ...current, failurePolicy }))} /> : null}
+                {draft.failurePolicy ? (
+                  <FailurePolicyEditor
+                    value={draft.failurePolicy}
+                    onChange={(failurePolicy) =>
+                      setDraft((current) => ({ ...current, failurePolicy }))
+                    }
+                  />
+                ) : null}
               </TabsContent>
             </Tabs>
           </fieldset>

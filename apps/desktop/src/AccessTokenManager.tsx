@@ -1,3 +1,4 @@
+import { ActionGroup } from "@/components/ActionGroup";
 import {
   type FormEvent,
   useCallback,
@@ -116,8 +117,9 @@ export function AccessTokenManager({
   const [name, setName] = useState("");
   const [creating, setCreating] = useState(false);
   const [deletingID, setDeletingID] = useState<string | null>(null);
-  const [pendingDelete, setPendingDelete] =
-    useState<AccessTokenSummary | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<AccessTokenSummary | null>(
+    null,
+  );
   const [copyingID, setCopyingID] = useState<string | null>(null);
   const [copiedID, setCopiedID] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -173,7 +175,9 @@ export function AccessTokenManager({
     try {
       const response = await listAccessTokenUsage(startOfTodayIso(new Date()));
       if (usageGeneration.current !== generation) return;
-      const totals = new Map(response.items.map((item) => [item.token_id, item]));
+      const totals = new Map(
+        response.items.map((item) => [item.token_id, item]),
+      );
       const next: Record<string, TokenUsageStats> = {};
       for (const tokenId of tokenIds) {
         const usage = totals.get(tokenId);
@@ -541,29 +545,7 @@ export function AccessTokenManager({
                         }
                       />
                     </div>
-                    <div className="flex shrink-0 items-center gap-1">
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={
-                          !isReady || deletingID !== null || copyingID !== null
-                        }
-                        onClick={() => void copyToken(token.id)}
-                        type="button"
-                      >
-                        {isCopying ? (
-                          <LoaderCircle animateOnHover={false} className="animate-spin motion-reduce:animate-none" />
-                        ) : isCopied ? (
-                          <Check />
-                        ) : (
-                          <Copy />
-                        )}
-                        {isCopying
-                          ? t("common.copying")
-                          : isCopied
-                            ? t("common.copied")
-                            : t("common.copy")}
-                      </Button>
+                    <ActionGroup className="shrink-0 gap-1">
                       <Button
                         className="text-danger-foreground hover:bg-danger-wash hover:text-danger-foreground"
                         disabled={!isReady || deletingID !== null}
@@ -583,7 +565,32 @@ export function AccessTokenManager({
                           ? t("tokens.deleting")
                           : t("common.delete")}
                       </Button>
-                    </div>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={
+                          !isReady || deletingID !== null || copyingID !== null
+                        }
+                        onClick={() => void copyToken(token.id)}
+                        type="button"
+                      >
+                        {isCopying ? (
+                          <LoaderCircle
+                            animateOnHover={false}
+                            className="animate-spin motion-reduce:animate-none"
+                          />
+                        ) : isCopied ? (
+                          <Check />
+                        ) : (
+                          <Copy />
+                        )}
+                        {isCopying
+                          ? t("common.copying")
+                          : isCopied
+                            ? t("common.copied")
+                            : t("common.copy")}
+                      </Button>
+                    </ActionGroup>
                   </article>
                 </DataRow>
               );

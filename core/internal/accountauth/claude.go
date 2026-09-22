@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/QuantumNous/astrlink/core/contract"
+	"github.com/QuantumNous/astrlink/core/internal/networkproxy"
 )
 
 const (
@@ -46,12 +47,16 @@ func normalizeClaudeConfig(config OAuthConfig) OAuthConfig {
 }
 
 func ApplyClaudeAPIHeaders(header http.Header, tokens AccountTokens) {
+	if header == nil {
+		return
+	}
+	header.Set("User-Agent", DefaultClaudeUserAgent)
 	header.Set("Authorization", "Bearer "+tokens.AccessToken)
 	header.Set("Anthropic-Version", "2023-06-01")
 	header.Set("Anthropic-Beta", "claude-code-20250219,oauth-2025-04-20")
 }
 
-func (manager *SessionManager) beginCodeAuthorization(serviceID contract.ServiceID) (contract.AuthorizationSession, error) {
+func (manager *SessionManager) beginCodeAuthorization(ctx context.Context, serviceID contract.ServiceID) (contract.AuthorizationSession, error) {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
 	if err := manager.canStartLocked(serviceID); err != nil {
@@ -79,9 +84,9 @@ func (manager *SessionManager) beginCodeAuthorization(serviceID contract.Service
 		Flow: contract.AuthorizationFlowCode, AuthorizationURL: authURL, ServiceID: serviceID,
 		ExpiresAt: now.Add(manager.config.SessionTTL), CreatedAt: now, UpdatedAt: now,
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(networkproxy.Copy(context.Background(), ctx))
 	manager.sessions[id] = &trackedSession{public: public, secrets: &sessionSecrets{
-		state: state, pkce: pkce, redirectURI: manager.config.CodeRedirectURI, cancel: cancel,
+		proxyContext: ctx, state: state, pkce: pkce, redirectURI: manager.config.CodeRedirectURI, cancel: cancel,
 	}}
 	manager.byService[serviceID] = id
 	go manager.expireAfter(ctx, id, manager.config.SessionTTL)
@@ -107,6 +112,7 @@ func (manager *SessionManager) CompleteCode(ctx context.Context, serviceID contr
 		return contract.AuthorizationSession{}, ErrStateMismatch
 	}
 	verifier, redirect := session.secrets.pkce.Verifier, session.secrets.redirectURI
+	ctx = networkproxy.Copy(ctx, session.secrets.proxyContext)
 	session.exchanging = true
 	manager.mu.Unlock()
 	defer func() {

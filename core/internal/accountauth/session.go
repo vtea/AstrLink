@@ -16,16 +16,18 @@ import (
 	"time"
 
 	"github.com/QuantumNous/astrlink/core/contract"
+	"github.com/QuantumNous/astrlink/core/internal/networkproxy"
 )
 
 const maxPendingAuthorizationSessions = 3
 
 type sessionSecrets struct {
-	state       string
-	pkce        PkceCodes
-	redirectURI string
-	listener    net.Listener
-	cancel      context.CancelFunc
+	proxyContext context.Context
+	state        string
+	pkce         PkceCodes
+	redirectURI  string
+	listener     net.Listener
+	cancel       context.CancelFunc
 }
 
 type trackedSession struct {
@@ -93,6 +95,13 @@ func (manager *SessionManager) Begin(
 	if manager.config.Provider == contract.SubscriptionProviderXAIGrok && flow != contract.AuthorizationFlowDeviceCode {
 		return contract.AuthorizationSession{}, fmt.Errorf("Grok requires device_code flow")
 	}
+	if manager.config.ResolveProxy != nil {
+		var err error
+		ctx, err = manager.config.ResolveProxy(ctx, serviceID)
+		if err != nil {
+			return contract.AuthorizationSession{}, err
+		}
+	}
 	if err := manager.store.Available(ctx); err != nil {
 		return contract.AuthorizationSession{}, fmt.Errorf("%w", ErrCredentialStoreUnavailable)
 	}
@@ -102,9 +111,9 @@ func (manager *SessionManager) Begin(
 
 	switch flow {
 	case contract.AuthorizationFlowCode:
-		return manager.beginCodeAuthorization(serviceID)
+		return manager.beginCodeAuthorization(ctx, serviceID)
 	case contract.AuthorizationFlowBrowser:
-		session, err := manager.beginBrowserAuthorization(serviceID)
+		session, err := manager.beginBrowserAuthorization(ctx, serviceID)
 		if !errors.Is(err, ErrCallbackPortsUnavailable) {
 			return session, err
 		}
@@ -121,6 +130,7 @@ func (manager *SessionManager) Begin(
 }
 
 func (manager *SessionManager) beginBrowserAuthorization(
+	ctx context.Context,
 	serviceID contract.ServiceID,
 ) (contract.AuthorizationSession, error) {
 	manager.mu.Lock()
@@ -160,9 +170,10 @@ func (manager *SessionManager) beginBrowserAuthorization(
 		ServiceID: serviceID, ExpiresAt: now.Add(manager.config.SessionTTL),
 		CreatedAt: now, UpdatedAt: now,
 	}
-	sessionContext, cancel := context.WithCancel(context.Background())
+	sessionContext, cancel := context.WithCancel(networkproxy.Copy(context.Background(), ctx))
 	secrets := &sessionSecrets{
-		state: state, pkce: pkce, redirectURI: browserRedirect,
+		proxyContext: sessionContext,
+		state:        state, pkce: pkce, redirectURI: browserRedirect,
 		listener: listener, cancel: cancel,
 	}
 	server := &http.Server{
@@ -215,7 +226,7 @@ func (manager *SessionManager) beginDeviceCodeAuthorization(
 		ServiceID: serviceID, ExpiresAt: now.Add(manager.config.DeviceCodeTTL),
 		CreatedAt: now, UpdatedAt: now,
 	}
-	sessionContext, cancel := context.WithCancel(context.Background())
+	sessionContext, cancel := context.WithCancel(networkproxy.Copy(context.Background(), ctx))
 	manager.sessions[sessionID] = &trackedSession{
 		public: public,
 		secrets: &sessionSecrets{
@@ -391,12 +402,22 @@ func (manager *SessionManager) buildAuthorizeURL(redirectURI, state, challenge s
 	} else {
 		query.Set("id_token_add_organizations", "true")
 		query.Set("codex_cli_simplified_flow", "true")
-		query.Set("originator", manager.config.Originator)
 	}
 	for key, values := range manager.config.ExtraAuthQuery {
+		if strings.EqualFold(key, "originator") {
+			continue
+		}
 		for _, value := range values {
 			query.Add(key, value)
 		}
+	}
+	if manager.config.Provider == contract.SubscriptionProviderOpenAICodex {
+		for key := range query {
+			if strings.EqualFold(key, "originator") {
+				query.Del(key)
+			}
+		}
+		query.Set("originator", DefaultCodexOriginator)
 	}
 	endpoint.RawQuery = query.Encode()
 	return endpoint.String(), nil
@@ -425,7 +446,7 @@ func (manager *SessionManager) callbackHandler(sessionID contract.AuthorizationS
 			writeCallbackPage(writer, false, "Authorization state mismatch.")
 			return
 		}
-		ctx, cancel := context.WithTimeout(request.Context(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(networkproxy.Copy(request.Context(), secrets.proxyContext), 30*time.Second)
 		defer cancel()
 		tokens, err := manager.tokens.ExchangeCode(ctx, code, secrets.pkce.Verifier, secrets.redirectURI)
 		if err != nil {

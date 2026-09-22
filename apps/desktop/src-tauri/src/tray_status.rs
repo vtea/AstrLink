@@ -1,6 +1,7 @@
 //! Menu-bar lamp. The color is only as strong as the facts the host already has:
 //! the in-memory gateway snapshot, and a full service list read from core.
 
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -20,6 +21,11 @@ pub const FETCH_INTERVAL: Duration = Duration::from_secs(30);
 const UNREADABLE_AFTER: Duration = Duration::from_secs(120);
 const UNREADABLE_STREAK: u32 = 3;
 const NOTICE_EVENT: &str = "tray-status-notice";
+const LAMP_MONO: u8 = 0;
+const LAMP_GREEN: u8 = 1;
+const LAMP_YELLOW: u8 = 2;
+const LAMP_RED: u8 = 3;
+static APPLIED_LAMP: AtomicU8 = AtomicU8::new(LAMP_MONO);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Lamp {
@@ -586,6 +592,25 @@ pub fn nudge(app: &tauri::AppHandle, message: TrayMsg) {
     }
 }
 
+pub fn lamp_overrides_icon() -> bool {
+    matches!(
+        APPLIED_LAMP.load(Ordering::Relaxed),
+        LAMP_YELLOW | LAMP_RED
+    )
+}
+
+fn store_lamp(lamp: Lamp) {
+    APPLIED_LAMP.store(
+        match lamp {
+            Lamp::Mono => LAMP_MONO,
+            Lamp::Green => LAMP_GREEN,
+            Lamp::Yellow => LAMP_YELLOW,
+            Lamp::Red => LAMP_RED,
+        },
+        Ordering::Relaxed,
+    );
+}
+
 pub fn spawn(app: tauri::AppHandle, manager: std::sync::Arc<CoreManager>) -> TrayControl {
     let (tx, mut rx) = mpsc::channel(32);
     let loop_tx = tx.clone();
@@ -807,11 +832,22 @@ fn apply_tray(app: &tauri::AppHandle, face: &TrayFace) -> Result<(), String> {
     let Some(tray) = app.tray_by_id("main") else {
         return Err("tray is not installed".to_string());
     };
-    apply_icon(app, &tray, face.lamp)?;
-    tray.set_tooltip(Some(face.tooltip.as_str()))
-        .map_err(|error| error.to_string())?;
-    let menu = tray_menu(app, face)?;
-    tray.set_menu(Some(menu)).map_err(|error| error.to_string())
+    // The popover tray owns clicks, menus and the ready/idle/watched glyphs.
+    // Subscription lamps only overlay when something needs attention.
+    let override_icon = matches!(face.lamp, Lamp::Yellow | Lamp::Red);
+    if override_icon {
+        apply_icon(app, &tray, face.lamp)?;
+        tray.set_tooltip(Some(face.tooltip.as_str()))
+            .map_err(|error| error.to_string())?;
+        store_lamp(face.lamp);
+    } else {
+        let was_override = lamp_overrides_icon();
+        store_lamp(face.lamp);
+        if was_override {
+            crate::tray::restore_native_icon(app);
+        }
+    }
+    Ok(())
 }
 
 fn apply_icon(
@@ -826,7 +862,7 @@ fn apply_icon(
             Lamp::Green => (tauri::include_image!("icons/tray/status-green.png"), false),
             Lamp::Yellow => (tauri::include_image!("icons/tray/status-yellow.png"), false),
             Lamp::Red => (tauri::include_image!("icons/tray/status-red.png"), false),
-            Lamp::Mono => (tauri::include_image!("icons/tray/36x36.png"), true),
+            Lamp::Mono => (tauri::include_image!("icons/tray/mac-idle/36x36.png"), true),
         };
         tray.set_icon_with_as_template(Some(icon), template)
             .map_err(|error| error.to_string())
@@ -854,6 +890,7 @@ fn apply_icon(
     }
 }
 
+#[allow(dead_code)]
 fn tray_menu(app: &tauri::AppHandle, face: &TrayFace) -> Result<Menu<tauri::Wry>, String> {
     let headline = MenuItem::with_id(app, "tray-status", &face.headline, false, None::<&str>)
         .map_err(|error| error.to_string())?;

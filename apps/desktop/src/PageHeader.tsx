@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { ArrowLeft } from "@/components/icons";
 
 import { Button } from "@/components/ui/button";
+import { ActionGroup } from "@/components/ActionGroup";
 import { cn } from "@/lib/utils";
 
 export function PageHeader({
@@ -12,8 +13,10 @@ export function PageHeader({
   description,
   headingLevel = 1,
   title,
+  titleGroupClassName,
   titleId,
-  variant = "plain",
+  titleSuffix,
+  variant = "compact",
 }: {
   actions?: ReactNode;
   actionsClassName?: string;
@@ -26,7 +29,9 @@ export function PageHeader({
   description?: ReactNode;
   headingLevel?: 1 | 2;
   title: string;
+  titleGroupClassName?: string;
   titleId?: string;
+  titleSuffix?: ReactNode;
   variant?: "card" | "plain" | "compact";
 }) {
   const compact = variant === "compact";
@@ -35,9 +40,7 @@ export function PageHeader({
     <header
       className={cn(
         "flex min-w-0 shrink-0 justify-between",
-        compact
-          ? "mb-3 items-center gap-3 border-b py-2"
-          : "items-end gap-6",
+        compact ? "mb-3 items-center gap-3 border-b py-2" : "items-end gap-6",
         !compact && variant === "card"
           ? "border-b bg-card px-4 pt-4 pb-3"
           : !compact
@@ -51,6 +54,7 @@ export function PageHeader({
         className={cn(
           "min-w-0",
           compact && "flex items-center gap-2",
+          titleGroupClassName,
         )}
       >
         {back ? (
@@ -76,13 +80,15 @@ export function PageHeader({
         ) : null}
         <Heading
           className={cn(
-            "font-semibold tracking-tight",
-            compact ? "truncate text-sm" : "text-xl",
+            "text-sm font-semibold tracking-tight",
+            compact && "truncate",
           )}
           id={titleId}
+          title={title}
         >
           {title}
         </Heading>
+        {titleSuffix}
         {compact || !description ? null : (
           <p className="mt-1 max-w-[64ch] truncate text-xs text-text-secondary [&_code]:text-text-secondary">
             {description}
@@ -90,9 +96,9 @@ export function PageHeader({
         )}
       </div>
       {actions ? (
-        <div className={cn("flex shrink-0 items-center gap-2", actionsClassName)}>
+        <ActionGroup className={cn("shrink-0", actionsClassName)}>
           {actions}
-        </div>
+        </ActionGroup>
       ) : null}
     </header>
   );
