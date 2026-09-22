@@ -374,7 +374,13 @@ fn update_preferences(
     // Locale, pages and menubar text re-render from stored state; a new usage
     // line needs numbers the last digest did not collect.
     if values.tray.usage != previous_tray.usage {
-        tray::request_usage_refresh(&app, true);
+        // Operator-initiated: fresh local numbers, and plan windows unless
+        // they were fetched a moment ago.
+        tray::request_usage_refresh(
+            &app,
+            true,
+            tray::PlanRefresh::IfOlderThan(tray::PLAN_REFRESH_VISIBLE),
+        );
     }
     tray_status::nudge(&app, tray_status::TrayMsg::Refresh);
     tray::refresh(&app);
@@ -1051,9 +1057,12 @@ async fn pricing(
 #[tauri::command]
 async fn get_service_usage(
     service_id: String,
+    fresh: Option<bool>,
     manager: State<'_, Arc<CoreManager>>,
 ) -> Result<serde_json::Value, String> {
-    manager.get_service_usage(&service_id).await
+    manager
+        .get_service_usage_with(&service_id, fresh.unwrap_or(false))
+        .await
 }
 
 #[tauri::command]
