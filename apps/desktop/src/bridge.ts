@@ -1,5 +1,6 @@
 import { parseServiceTestResult, type ServiceTestInput, type ServiceTestResult } from "./service-test-model";
 import { parseChannelBindingAudit } from "./channel-binding-model";
+import { appLog } from "./app-log";
 import { parseRecoveryPath, parseRecoveryPathRecord, parseRecoveryPathPage, parseRecoveryPreview, type RecoveryPathInput, type RecoveryPreviewInput } from "./recovery-path-model";
 import { parseRoutingSettings, type RoutingSettings } from "./failure-policy-model";
 import { invoke as invokeCommand } from "@tauri-apps/api/core";
@@ -126,15 +127,31 @@ function hasNativeBridge(): boolean {
 // diagnosis then reads "无法读取…" no matter whether Core was unreachable or
 // returned a field the interface refused. Carrying the reason across keeps the
 // specific message on screen.
+const QUIET_COMMANDS = new Set(["append_app_log", "list_app_logs", "core_status"]);
+
 async function invoke<T>(
   ...call: Parameters<typeof invokeCommand>
 ): Promise<T> {
+  const command = String(call[0]);
+  if (!QUIET_COMMANDS.has(command)) {
+    try {
+      appLog.debug("ui.bridge", command);
+    } catch {
+      // A log write must not replace the command.
+    }
+  }
   try {
     return await invokeCommand<T>(...call);
   } catch (error) {
-    if (typeof error === "string") {
-      throw new Error(error);
+    const failure = typeof error === "string" ? new Error(error) : error;
+    if (command !== "append_app_log") {
+      try {
+        appLog.error("ui.bridge", `${command} failed`, failure);
+      } catch {
+        // A log write must not replace the command failure.
+      }
     }
+    if (failure instanceof Error) throw failure;
     throw error;
   }
 }
@@ -184,6 +201,57 @@ export async function startCore(): Promise<AppSnapshot> {
 export async function stopCore(): Promise<AppSnapshot> {
   requireNativeBridge();
   return parseAppSnapshot(await invoke<unknown>("stop_core"));
+}
+
+export async function getAppLogLocation(): Promise<string> {
+  requireNativeBridge();
+  const value = await invoke<unknown>("app_log_location");
+  if (!value || typeof value !== "object") {
+    throw new Error("Invalid app log location");
+  }
+  const path = (value as { path?: unknown }).path;
+  if (typeof path !== "string" || path.length === 0) {
+    throw new Error("Invalid app log location");
+  }
+  return path;
+}
+
+export async function revealAppLog(): Promise<void> {
+  requireNativeBridge();
+  await invoke("reveal_app_log");
+}
+
+export interface AppLogRecord {
+  sequence: number;
+  time: string;
+  level: string;
+  target: string;
+  message: string;
+}
+
+export async function listAppLogs(): Promise<AppLogRecord[]> {
+  requireNativeBridge();
+  const value = await invoke<unknown>("list_app_logs");
+  if (!Array.isArray(value)) throw new Error("Invalid app log records");
+  return value.flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    const record = item as AppLogRecord;
+    if (
+      !Number.isSafeInteger(record.sequence) || record.sequence < 1 ||
+      typeof record.time !== "string" ||
+      typeof record.level !== "string" ||
+      typeof record.target !== "string" ||
+      typeof record.message !== "string"
+    ) {
+      return [];
+    }
+    return [record];
+  });
+}
+
+export async function showAppLogWindow(): Promise<void> {
+  requireNativeBridge();
+  await invoke("show_app_log_window");
 }
 
 export async function getPreferences(): Promise<SettingsSnapshot> {

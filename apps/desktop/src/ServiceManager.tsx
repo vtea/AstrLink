@@ -70,6 +70,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 
+import { appLog } from "./app-log";
 import {
   beginServiceAuthorization,
   cancelServiceAuthorization,
@@ -679,7 +680,11 @@ export function ServiceManager({
           }));
         } catch (cause) {
           const message = formatSubscriptionUsageError(cause);
-          console.error("AstrLink failed to load subscription usage", id, cause);
+          appLog.error(
+            "ui.services",
+            `AstrLink failed to load subscription usage ${id}`,
+            cause,
+          );
           if (usageGeneration.current !== generation) return;
           setUsageByService((current) => ({
             ...current,
@@ -1010,9 +1015,11 @@ export function ServiceManager({
         }
       });
       if (warnings.length === attempts.length) {
-        setError(
-          t("services.fetchFailedDetail", { warnings: warnings.join("；") }),
-        );
+        const detail = t("services.fetchFailedDetail", {
+          warnings: warnings.join("；"),
+        });
+        appLog.error("ui.services", detail);
+        setError(detail);
         return;
       }
       const models = [...new Set([...draft.models, ...discovered])].sort();
@@ -1274,9 +1281,9 @@ export function ServiceManager({
       await onRefresh();
     } catch (cause) {
       if (confirmAction.kind === "reset-usage") {
-        console.error(
-          "AstrLink failed to reset subscription usage",
-          service.id,
+        appLog.error(
+          "ui.services",
+          `AstrLink failed to reset subscription usage ${service.id}`,
           cause,
         );
         notify.error(formatSubscriptionUsageError(cause));

@@ -9,6 +9,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { SectionKicker } from "@/components/SectionKicker";
+import { appLog } from "./app-log";
 import { i18n } from "./i18n";
 
 interface AppErrorBoundaryProps {
@@ -30,7 +31,14 @@ export class AppErrorBoundary extends Component<
   }
 
   componentDidCatch(error: Error, info: ErrorInfo): void {
-    console.error("AstrLink interface render failed", error, info);
+    const detail = info.componentStack?.trim();
+    appLog.error(
+      "ui.render",
+      detail
+        ? `AstrLink interface render failed ${detail}`
+        : "AstrLink interface render failed",
+      error,
+    );
   }
 
   render(): ReactNode {

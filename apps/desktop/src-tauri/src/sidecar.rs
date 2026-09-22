@@ -281,14 +281,20 @@ fn publish_control_session_from_inner(inner: &CoreInner) {
         inner.control_token.as_deref(),
         inner.pid,
     ) {
-        eprintln!("unable to publish AstrLink control session: {error}");
+        crate::app_log::error!(
+            "shell.sidecar",
+            "unable to publish AstrLink control session: {error}"
+        );
     }
 }
 
 fn clear_published_control_session() {
     if let Ok(home) = control_session::user_home() {
         if let Err(error) = control_session::clear_control_session(&home) {
-            eprintln!("unable to clear AstrLink control session: {error}");
+            crate::app_log::error!(
+                "shell.sidecar",
+                "unable to clear AstrLink control session: {error}"
+            );
         }
     }
 }
@@ -736,7 +742,10 @@ impl CoreManager {
             if self.wait_until_stopped(generation).await.is_ok() {
                 return Ok(());
             }
-            eprintln!("astrlink-core graceful shutdown timed out; using force-stop fallback");
+            crate::app_log::warning!(
+                "shell.sidecar",
+                "astrlink-core graceful shutdown timed out; using force-stop fallback"
+            );
         }
         if let Some(generation) = self.request_stop()? {
             self.wait_until_stopped(generation).await?;
@@ -782,7 +791,8 @@ impl CoreManager {
             }
             Ok(response) => {
                 self.restore_after_graceful_stop_failure(generation);
-                eprintln!(
+                crate::app_log::warning!(
+                    "shell.sidecar",
                     "astrlink-core graceful shutdown returned {}; using force-stop fallback",
                     response.status()
                 );
@@ -790,7 +800,8 @@ impl CoreManager {
             }
             Err(error) => {
                 self.restore_after_graceful_stop_failure(generation);
-                eprintln!(
+                crate::app_log::warning!(
+                    "shell.sidecar",
                     "astrlink-core graceful shutdown failed: {error}; using force-stop fallback"
                 );
                 Ok(None)
@@ -949,7 +960,10 @@ impl CoreManager {
                 }
                 CommandEvent::Stderr(bytes) => {
                     let line = String::from_utf8_lossy(&bytes);
-                    eprintln!("{}", line.trim());
+                    let line = line.trim();
+                    if !line.is_empty() {
+                        log_core_stderr(line);
+                    }
                 }
                 CommandEvent::Error(error) => {
                     self.handle_process_error(generation, format!("sidecar event error: {error}"));
@@ -989,9 +1003,11 @@ impl CoreManager {
             }
             inner.ready = Some(ready.clone());
             if let Some(fallback) = inner.inference_port_fallback() {
-                eprintln!(
+                crate::app_log::warning!(
+                    "shell.sidecar",
                     "inference port {} is occupied; using 127.0.0.1:{} for this run",
-                    fallback.requested_port, fallback.active_port
+                    fallback.requested_port,
+                    fallback.active_port
                 );
             }
             inner.phase = CorePhase::Handshaking;
@@ -1600,7 +1616,7 @@ impl CoreManager {
             .await?;
         serde_json::from_slice(&body).map_err(|error| {
             let message = format!("service usage returned invalid JSON: {error}");
-            eprintln!("astrlink: GET {path} failed: {message}");
+            crate::app_log::error!("shell.sidecar", "astrlink: GET {path} failed: {message}");
             message
         })
     }
@@ -1613,7 +1629,7 @@ impl CoreManager {
             .await?;
         serde_json::from_slice(&body).map_err(|error| {
             let message = format!("service usage reset returned invalid JSON: {error}");
-            eprintln!("astrlink: POST {path} failed: {message}");
+            crate::app_log::error!("shell.sidecar", "astrlink: POST {path} failed: {message}");
             message
         })
     }
@@ -1980,7 +1996,9 @@ impl CoreManager {
             .authenticated_control_response(method.clone(), path, body, if_match)
             .await?;
         if !status.is_success() {
-            return Err(control_status_error(&method, path, status, &body));
+            let message = control_status_error(&method, path, status, &body);
+            crate::app_log::error!("shell.sidecar", "{message}");
+            return Err(message);
         }
         Ok((etag, body))
     }
@@ -2049,7 +2067,11 @@ impl CoreManager {
                         last_error = Some(error);
                         continue;
                     }
-                    eprintln!("astrlink: {} {path} failed: {error}", method.as_str());
+                    crate::app_log::error!(
+                        "shell.sidecar",
+                        "astrlink: {} {path} failed: {error}",
+                        method.as_str()
+                    );
                     return Err(error);
                 }
             }
@@ -2060,7 +2082,11 @@ impl CoreManager {
                 method.as_str()
             )
         });
-        eprintln!("astrlink: {} {path} failed: {error}", method.as_str());
+        crate::app_log::error!(
+            "shell.sidecar",
+            "astrlink: {} {path} failed: {error}",
+            method.as_str()
+        );
         Err(error)
     }
 
@@ -5107,6 +5133,36 @@ impl CoreManager {
     }
 }
 
+fn ingress_status(line: &str) -> Option<&str> {
+    let mut parts = line.split_whitespace();
+    while let Some(token) = parts.next() {
+        if token == "ingress" {
+            parts.next()?;
+            return parts.next();
+        }
+    }
+    None
+}
+
+fn core_stderr_level(line: &str) -> crate::app_log::Level {
+    match ingress_status(line) {
+        Some("failed") => crate::app_log::Level::Error,
+        Some("succeeded") | Some("pending") => crate::app_log::Level::Info,
+        _ => crate::app_log::Level::Warn,
+    }
+}
+
+fn log_core_stderr(line: &str) {
+    match core_stderr_level(line) {
+        crate::app_log::Level::Error => crate::app_log::error!("shell.core", "{line}"),
+        crate::app_log::Level::Info => crate::app_log::info!("shell.core", "{line}"),
+        crate::app_log::Level::Debug | crate::app_log::Level::Trace => {
+            crate::app_log::debug!("shell.core", "{line}")
+        }
+        crate::app_log::Level::Warn => crate::app_log::warning!("shell.core", "{line}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -5128,6 +5184,29 @@ mod tests {
         );
     }
     use super::*;
+
+    #[test]
+    fn core_stderr_level_follows_the_ingress_result() {
+        let succeeded = "astrlink-core: 2026/09/22 15:05:36 ingress openai.responses succeeded 5348ms request=request_d059 session=session_f3ac";
+        let failed = "astrlink-core: 2026/09/22 14:54:53 ingress openai.responses failed 2ms request=request_7987 session=session_f1ac";
+        let cancelled = "astrlink-core: 2026/09/22 15:06:27 ingress openai.responses cancelled 57113ms request=request_a984 session=session_f3ac";
+        assert_eq!(
+            super::core_stderr_level(succeeded),
+            crate::app_log::Level::Info
+        );
+        assert_eq!(
+            super::core_stderr_level(failed),
+            crate::app_log::Level::Error
+        );
+        assert_eq!(
+            super::core_stderr_level(cancelled),
+            crate::app_log::Level::Warn
+        );
+        assert_eq!(
+            super::core_stderr_level("astrlink-core: sidecar event error: broken pipe"),
+            crate::app_log::Level::Warn
+        );
+    }
 
     #[test]
     fn strictly_parses_browser_and_device_authorization_sessions() {

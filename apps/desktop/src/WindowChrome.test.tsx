@@ -21,6 +21,7 @@ const windowMocks = vi.hoisted(() => ({
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: windowMocks.invoke,
+  isTauri: () => false,
 }));
 
 vi.mock("@tauri-apps/api/window", () => ({

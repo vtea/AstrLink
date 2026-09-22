@@ -144,6 +144,7 @@
     "records": "请求记录",
     "routing": "路由",
     "agentTools": "Agent 工具",
+    "logs": "日志",
     "settings": "设置",
     "gateway": "网关",
     "gatewayStatus": "网关 {{status}}"
@@ -267,6 +268,25 @@
     "notifyRestart": "网关正在使用已保存设置重启。",
     "notifyPortSavedRestart": "入口设置已保存。重启网关后生效。",
     "notifyPortSaved": "入口设置已保存。"
+  },
+  "logs": {
+    "title": "日志",
+    "description": "桌面界面和壳的运行日志。请求调用请看「请求记录」。",
+    "kicker": "诊断",
+    "fileTitle": "应用日志文件",
+    "fileHint": "软件更新后仍写入同一路径。超过 2 MiB 会留下一份 astrlink.log.1。",
+    "pathLabel": "文件位置",
+    "pathUnavailable": "尚未解析到日志路径。",
+    "copyPath": "复制路径",
+    "open": "打开日志文件",
+    "opening": "正在打开…",
+    "failed": "无法打开日志。",
+    "empty": "尚无日志。新的记录会从底部出现。",
+    "level": "级别",
+    "levelAll": "全部",
+    "jumpToBottom": "回到底部",
+    "copy": "复制所选",
+    "copyEmpty": "先在日志里选中要复制的文字。"
   },
   "agentDebug": {
     "title": "Agent 工具",
@@ -1668,11 +1688,30 @@
     "tray": {
       "show": "显示 AstrLink",
       "quit": "退出",
-      "reload": "重新加载界面"
+      "reload": "重新加载界面",
+      "view": "查看",
+      "tooltip": "AstrLink · {{status}}",
+      "gateway": "网关：{{detail}}",
+      "api": "API：{{status}}",
+      "checking": "正在核对 API",
+      "apiUnreadable": "无法读取 API 状态",
+      "gatewayUnchecked": "网关未就绪，未检查",
+      "noneConfigured": "未配置 API",
+      "noneEnabled": "没有启用的 API",
+      "httpConfigured": "已配置 API，连接未检测：{{count}}",
+      "connected": "已连接订阅：{{count}}",
+      "incompleteCount": "未完成授权：{{count}}",
+      "failedCount": "需要重新授权：{{count}}",
+      "portChanged": "本次使用 {{address}}",
+      "portHeadline": "推理端口已改道",
+      "incompleteHeadline": "订阅尚未完成授权",
+      "blockedHeadline": "订阅无法继续服务",
+      "degradedHeadline": "订阅需要处理"
     },
     "window": {
       "trajectoryInspector": "AstrLink · 轨迹链路",
-      "trajectoryInspectorPinned": "AstrLink · 轨迹链路（已固定）"
+      "trajectoryInspectorPinned": "AstrLink · 轨迹链路（已固定）",
+      "appLog": "AstrLink · 日志"
     },
     "autostart": {
       "readFailed": "无法读取系统开机启动状态：{{error}}",

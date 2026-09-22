@@ -144,6 +144,7 @@
     "records": "Request records",
     "routing": "Routing",
     "agentTools": "Agent tools",
+    "logs": "Logs",
     "settings": "Settings",
     "gateway": "Gateway",
     "gatewayStatus": "Gateway {{status}}"
@@ -267,6 +268,25 @@
     "notifyRestart": "The gateway is restarting with the saved settings.",
     "notifyPortSavedRestart": "Entry settings saved. Restart the gateway to apply them.",
     "notifyPortSaved": "Entry settings saved."
+  },
+  "logs": {
+    "title": "Logs",
+    "description": "Runtime logs from the desktop interface and shell. Request calls live under Request records.",
+    "kicker": "Diagnostics",
+    "fileTitle": "Application log file",
+    "fileHint": "Updates keep writing this same path. A file over 2 MiB leaves one astrlink.log.1.",
+    "pathLabel": "Location",
+    "pathUnavailable": "The log path is not available yet.",
+    "copyPath": "Copy path",
+    "open": "Open log file",
+    "opening": "Opening…",
+    "failed": "Unable to open the log.",
+    "empty": "No log lines yet. New lines appear at the bottom.",
+    "level": "Level",
+    "levelAll": "All",
+    "jumpToBottom": "Jump to bottom",
+    "copy": "Copy selection",
+    "copyEmpty": "Select log text first."
   },
   "agentDebug": {
     "title": "Agent tools",
@@ -1668,11 +1688,30 @@
     "tray": {
       "show": "Show AstrLink",
       "quit": "Quit",
-      "reload": "Reload interface"
+      "reload": "Reload interface",
+      "view": "View",
+      "tooltip": "AstrLink · {{status}}",
+      "gateway": "Gateway: {{detail}}",
+      "api": "API: {{status}}",
+      "checking": "Checking APIs",
+      "apiUnreadable": "API status unavailable",
+      "gatewayUnchecked": "Gateway is not ready, APIs not checked",
+      "noneConfigured": "No APIs configured",
+      "noneEnabled": "No APIs enabled",
+      "httpConfigured": "APIs configured, connection not checked: {{count}}",
+      "connected": "Connected subscriptions: {{count}}",
+      "incompleteCount": "Subscriptions not signed in: {{count}}",
+      "failedCount": "Subscriptions needing attention: {{count}}",
+      "portChanged": "using {{address}}",
+      "portHeadline": "Inference port changed",
+      "incompleteHeadline": "A subscription is not signed in",
+      "blockedHeadline": "Subscriptions cannot serve requests",
+      "degradedHeadline": "A subscription needs attention"
     },
     "window": {
       "trajectoryInspector": "AstrLink · Trajectory call",
-      "trajectoryInspectorPinned": "AstrLink · Trajectory call (Pinned)"
+      "trajectoryInspectorPinned": "AstrLink · Trajectory call (Pinned)",
+      "appLog": "AstrLink · Logs"
     },
     "autostart": {
       "readFailed": "Unable to read the system login-item state: {{error}}",

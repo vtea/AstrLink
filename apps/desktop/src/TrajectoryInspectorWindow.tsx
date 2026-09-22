@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 
+import { appLog } from "./app-log";
 import { getRequestAuditContent } from "./bridge";
 import { useCopyFeedback } from "./copy-feedback";
 import { i18n } from "./i18n";
@@ -58,7 +59,11 @@ export function TrajectoryInspectorWindow() {
         });
       })
       .catch((error: unknown) => {
-        console.error("AstrLink inspector window cannot subscribe", error);
+        appLog.error(
+          "ui.inspector",
+          "AstrLink inspector window cannot subscribe",
+          error,
+        );
       });
     return () => {
       active = false;
@@ -75,7 +80,11 @@ export function TrajectoryInspectorWindow() {
       .catch((error: unknown) => {
         setPinned(!next);
         notify.error(i18n.t("trajectory.pinFailed"));
-        console.error("AstrLink inspector window cannot change its pin", error);
+        appLog.error(
+          "ui.inspector",
+          "AstrLink inspector window cannot change its pin",
+          error,
+        );
       });
   }, []);
 

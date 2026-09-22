@@ -11,6 +11,7 @@ import {
   Home as House,
   Key as KeyRound,
   Route,
+  ScanText,
   Server,
   Settings,
   ShieldCheck,
@@ -45,11 +46,16 @@ import {
 } from "./core-model";
 import { Overview, type ServiceCatalog } from "./Overview";
 import { i18n, useT } from "./i18n";
+import { useTrayNotices } from "./tray-notices";
 import { RequestGate } from "./request-gate";
 import { RequestRecords } from "./RequestRecords";
 import { RouteManager } from "./RouteManager";
 import { SafetyPolicy } from "./SafetyPolicy";
 import { AgentDebugSettings } from "./AgentDebugSettings";
+import { AppLogs } from "./AppLogs";
+import { describeWorkspacePage } from "./app-activity";
+import { appLog } from "./app-log";
+import { detachedLogWindowEnabled, showAppLogWindow } from "./app-log-window";
 import { SettingsCenter } from "./SettingsCenter";
 import { ServiceManager, type ServiceManagerView } from "./ServiceManager";
 import type { Service } from "./service-model";
@@ -67,6 +73,7 @@ type WorkspacePage =
   | { kind: "records" }
   | { kind: "routing" }
   | { kind: "agentTools" }
+  | { kind: "logs" }
   | { kind: "settings" }
   | ServiceManagerView;
 
@@ -76,6 +83,7 @@ type IconName =
   | "home"
   | "key"
   | "route"
+  | "scan"
   | "server"
   | "settings"
   | "shield";
@@ -110,6 +118,7 @@ const icons: Record<IconName, AnimatedIcon> = {
   home: House,
   key: KeyRound,
   route: Route,
+  scan: ScanText,
   server: Server,
   settings: Settings,
   shield: ShieldCheck,
@@ -171,6 +180,13 @@ export default function App() {
     DEFAULT_USAGE_RANGE_PRESET,
   );
   const [page, setPage] = useState<WorkspacePage>({ kind: "overview" });
+  const phaseRef = useRef<string | null>(null);
+  const logPhase = useCallback((phase: string) => {
+    if (phaseRef.current === phase) return;
+    phaseRef.current = phase;
+    appLog.info("ui.app", `phase ${phase}`);
+  }, []);
+  const pageKey = describeWorkspacePage(page);
   const [pendingPage, setPendingPage] = useState<WorkspacePage | null>(null);
   const [copyFeedback, setCopyFeedback] = useState<string | null>(null);
   const [copyError, setCopyError] = useState<string | null>(null);
@@ -191,15 +207,23 @@ export default function App() {
     if (generation === null) return;
     try {
       const next = await getCoreStatus();
-      if (requestGate.isCurrent(generation)) setSnapshot(next);
+      if (requestGate.isCurrent(generation)) {
+        logPhase(next.phase);
+        setSnapshot(next);
+      }
     } catch (error) {
       if (requestGate.isCurrent(generation)) {
+        logPhase("error");
         setSnapshot((current) =>
           failedSnapshot(current, messageOf(error, i18n.t("app.queryFailed"))),
         );
       }
     }
-  }, [requestGate]);
+  }, [logPhase, requestGate]);
+
+  useEffect(() => {
+    appLog.info("ui.render", pageKey);
+  }, [pageKey]);
 
   useEffect(() => {
     let cancelled = false;
@@ -448,6 +472,8 @@ export default function App() {
     [handleEditorDirtyChange, page],
   );
 
+  useTrayNotices(navigate);
+
   const confirmPendingNavigation = () => {
     if (pendingPage === null) return;
     setPage(pendingPage);
@@ -570,6 +596,20 @@ export default function App() {
             onClick={() => navigate({ kind: "agentTools" })}
           />
           <NavButton
+            active={page.kind === "logs"}
+            icon="scan"
+            label={t("nav.logs")}
+            onClick={() => {
+              if (detachedLogWindowEnabled()) {
+                void showAppLogWindow().catch((error: unknown) => {
+                  appLog.error("ui.logs", "Unable to open the log window", error);
+                });
+                return;
+              }
+              navigate({ kind: "logs" });
+            }}
+          />
+          <NavButton
             active={page.kind === "settings"}
             icon="settings"
             label={t("nav.settings")}
@@ -597,7 +637,7 @@ export default function App() {
             // centred, so a single row of data never spans the whole window.
             "@container/workspace-surface mx-auto h-full min-h-0 w-full max-w-[1080px] min-w-0 px-8 pt-[calc(var(--window-chrome-height)+28px)] pb-8 max-[900px]:px-5 max-h-[680px]:pt-[calc(var(--window-chrome-height)+18px)] max-h-[680px]:pb-5",
             "flex flex-col",
-            ["overview", "list", "create", "edit", "tokens", "records", "safety", "routing", "agentTools"].includes(
+            ["overview", "list", "create", "edit", "tokens", "records", "safety", "routing", "agentTools", "logs"].includes(
               page.kind,
             )
               ? "overflow-hidden"
@@ -660,6 +700,8 @@ export default function App() {
             />
           ) : page.kind === "agentTools" ? (
             <AgentDebugSettings />
+          ) : page.kind === "logs" ? (
+            <AppLogs />
           ) : page.kind === "settings" ? (
             <SettingsCenter
               onCoreSnapshot={setSnapshot}

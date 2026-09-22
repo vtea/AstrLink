@@ -103,13 +103,16 @@ pub fn build_generation_url(dev_url: &str) -> Result<Url, String> {
 
 pub fn start(app: &AppHandle) {
     let Some(dev_url) = app.config().build.dev_url.as_ref() else {
-        eprintln!("[astrlink dev] build.dev_url 未配置，未启动前端热加载");
+        crate::app_log::debug!(
+            "shell.dev",
+            "[astrlink dev] build.dev_url 未配置，未启动前端热加载"
+        );
         return;
     };
     let endpoint = match build_generation_url(dev_url.as_str()) {
         Ok(url) => url,
         Err(error) => {
-            eprintln!("[astrlink dev] {error}");
+            crate::app_log::debug!("shell.dev", "[astrlink dev] {error}");
             return;
         }
     };
@@ -130,12 +133,18 @@ pub fn reload_windows(app: &AppHandle) -> bool {
         match window.reload() {
             Ok(()) => reloaded = true,
             Err(error) => {
-                eprintln!("[astrlink dev] webview.reload failed for {label}: {error}");
+                crate::app_log::debug!(
+                    "shell.dev",
+                    "[astrlink dev] webview.reload failed for {label}: {error}"
+                );
             }
         }
     }
     if !reloaded {
-        eprintln!("[astrlink dev] no webview is available to reload");
+        crate::app_log::debug!(
+            "shell.dev",
+            "[astrlink dev] no webview is available to reload"
+        );
     }
     reloaded
 }
@@ -149,7 +158,10 @@ async fn supervise(app: AppHandle, endpoint: Url) {
     {
         Ok(client) => client,
         Err(error) => {
-            eprintln!("[astrlink dev] unable to build reload HTTP client: {error}");
+            crate::app_log::debug!(
+                "shell.dev",
+                "[astrlink dev] unable to build reload HTTP client: {error}"
+            );
             return;
         }
     };
@@ -167,26 +179,33 @@ async fn supervise(app: AppHandle, endpoint: Url) {
 
 fn apply_tick(app: &AppHandle, state: &mut SupervisorState, endpoint: &Url, tick: Tick) -> bool {
     if tick.recovered {
-        eprintln!("[astrlink dev] /__astrlink_build 已恢复");
+        crate::app_log::info!("shell.dev", "[astrlink dev] /__astrlink_build 已恢复");
     }
 
     match tick.action {
         SupervisorAction::Remember { .. } | SupervisorAction::Idle => true,
         SupervisorAction::Reload { generation } => {
-            eprintln!("[astrlink dev] frontend rebuild #{generation} -> reloading webviews");
+            crate::app_log::info!(
+                "shell.dev",
+                "[astrlink dev] frontend rebuild #{generation} -> reloading webviews"
+            );
             if reload_windows(app) {
                 state.commit_seen(generation);
             }
             true
         }
         SupervisorAction::StopHttp { status } => {
-            eprintln!(
+            crate::app_log::debug!(
+                "shell.dev",
                 "[astrlink dev] /__astrlink_build 返回 HTTP {status}，热加载已停止（rsbuild 配置可能变了）"
             );
             false
         }
         SupervisorAction::WarnUnreachable => {
-            eprintln!("[astrlink dev] 连续无法连接 /__astrlink_build（{endpoint}），热加载已暂停");
+            crate::app_log::debug!(
+                "shell.dev",
+                "[astrlink dev] 连续无法连接 /__astrlink_build（{endpoint}），热加载已暂停"
+            );
             true
         }
     }

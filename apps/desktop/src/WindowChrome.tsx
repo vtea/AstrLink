@@ -16,6 +16,7 @@ import {
   loadLinuxWindowControlLayout,
   parseLinuxDecorationLayout,
 } from "./window-chrome";
+import { appLog } from "./app-log";
 import { i18n } from "./i18n";
 import { cn } from "@/lib/utils";
 import { Maximize, Minimize, SquareStack, X } from "@/components/icons";
@@ -125,7 +126,7 @@ export function WindowChrome({
         ]);
         if (active) setWindowState({ focused, fullscreen, maximized });
       } catch (error) {
-        console.error("Unable to read AstrLink window state", error);
+        appLog.error("ui.window", "Unable to read AstrLink window state", error);
       }
     };
 
@@ -148,7 +149,7 @@ export function WindowChrome({
         }
       })
       .catch((error: unknown) => {
-        console.error("Unable to observe AstrLink window state", error);
+        appLog.error("ui.window", "Unable to observe AstrLink window state", error);
       });
 
     return () => {
@@ -165,7 +166,11 @@ export function WindowChrome({
         if (active) setLinuxLayout(layout);
       })
       .catch((error: unknown) => {
-        console.error("Unable to read Linux window decoration layout", error);
+        appLog.error(
+          "ui.window",
+          "Unable to read Linux window decoration layout",
+          error,
+        );
       });
     return () => {
       active = false;
@@ -184,7 +189,7 @@ export function WindowChrome({
   const runWindowAction = useCallback(
     (action: () => Promise<unknown>) => {
       void action().catch((error: unknown) => {
-        console.error("AstrLink window action failed", error);
+        appLog.error("ui.window", "AstrLink window action failed", error);
       });
     },
     [],

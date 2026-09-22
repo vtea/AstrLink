@@ -10,7 +10,10 @@ const hostMocks = vi.hoisted(() => ({
   unlisten: vi.fn(),
 }));
 
-vi.mock("@tauri-apps/api/core", () => ({ invoke: hostMocks.invoke }));
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: hostMocks.invoke,
+  isTauri: () => false,
+}));
 vi.mock("@tauri-apps/api/event", () => ({ listen: hostMocks.listen }));
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({ label: "trajectory-inspector-2" }),

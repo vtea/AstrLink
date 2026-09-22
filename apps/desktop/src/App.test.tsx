@@ -13,6 +13,7 @@ describe("desktop application shell", () => {
     expect(markup).toContain("访问令牌");
     expect(markup).toContain("路由");
     expect(markup).toContain("Agent 工具");
+    expect(markup).toContain("日志");
     expect(markup).toContain("设置");
     expect(markup).toContain("overview-welcome");
     expect(markup).toContain("正在读取工作区");

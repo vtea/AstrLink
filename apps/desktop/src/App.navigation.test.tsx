@@ -3,6 +3,32 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { toast } from "sonner";
+import type { TrayNoticeEvent } from "./tray-notices";
+
+const trayHost = vi.hoisted(() => ({
+  native: false,
+  listener: undefined as undefined | ((event: { payload: TrayNoticeEvent }) => void),
+}));
+vi.mock("@tauri-apps/api/core", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@tauri-apps/api/core")>(),
+  isTauri: () => trayHost.native,
+  invoke: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock("@tauri-apps/api/event", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@tauri-apps/api/event")>(),
+  listen: vi.fn(async (event, listener) => {
+    if (event === "tray-status-notice") trayHost.listener = listener;
+    return () => { if (trayHost.listener === listener) trayHost.listener = undefined; };
+  }),
+}));
+vi.mock("@tauri-apps/api/window", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@tauri-apps/api/window")>(),
+  getCurrentWindow: () => ({
+    isVisible: async () => true,
+    onFocusChanged: async () => () => {},
+  }),
+}));
 
 const bridgeMocks = vi.hoisted(() => ({
   cancelPrivacyModelInstallation: vi.fn(),
@@ -16,7 +42,9 @@ const bridgeMocks = vi.hoisted(() => ({
   getAgentDebugStatus: vi.fn(),
   getAuditSettings: vi.fn(),
   getCoreStatus: vi.fn(),
+  getAppLogLocation: vi.fn(),
   getPreferences: vi.fn(),
+  revealAppLog: vi.fn(),
   getRoutingSettings: vi.fn(),
   getServiceOrder: vi.fn().mockResolvedValue({ service_ids: [], etag: '"order"' }),
   updateServiceOrder: vi.fn(),
@@ -188,12 +216,18 @@ describe("App workspace navigation", () => {
   let root: Root;
 
   beforeEach(() => {
+    trayHost.native = false;
+    trayHost.listener = undefined;
     (
       globalThis as typeof globalThis & {
         IS_REACT_ACT_ENVIRONMENT?: boolean;
       }
     ).IS_REACT_ACT_ENVIRONMENT = true;
     vi.clearAllMocks();
+    bridgeMocks.getAppLogLocation.mockResolvedValue(
+      "/tmp/com.astrlink.desktop/logs/astrlink.log",
+    );
+    bridgeMocks.revealAppLog.mockResolvedValue(undefined);
     bridgeMocks.getRoutingSettings.mockResolvedValue({ default_failure_policy: defaultFailurePolicy(), allow_unmatched_failover: false, strategy: "retry_first", max_attempts: 6 });
     bridgeMocks.listRecoveryPaths.mockResolvedValue([]);
     bridgeMocks.getCoreStatus.mockResolvedValue(readySnapshot);
@@ -574,6 +608,23 @@ describe("App workspace navigation", () => {
     expect(bridgeMocks.getAgentDebugStatus).toHaveBeenCalled();
   });
 
+  it("opens the application log page from the system nav", async () => {
+    await renderApp();
+
+    await act(async () => {
+      button("日志").click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(
+      document.querySelector('[aria-current="page"]')?.textContent,
+    ).toContain("日志");
+    expect(workspaceHeading().textContent).toBe("日志");
+    expect(container.textContent).toContain("尚无日志");
+    expect(container.textContent).toContain("打开日志文件");
+  });
+
   it("protects unsaved desktop preferences during navigation", async () => {
     bridgeMocks.getPreferences.mockResolvedValue({
       values: {
@@ -788,6 +839,31 @@ describe("App workspace navigation", () => {
     expect(workspaceHeading().textContent).toBe("API 提供商");
     expect(container.textContent).not.toContain("放弃未保存的修改？");
     expect(document.querySelector('[role="alertdialog"]')).toBeNull();
+  });
+
+  it("protects unsaved edits when clicking a toast created on a previous page", async () => {
+    trayHost.native = true;
+    const show = vi.spyOn(toast, "error").mockReturnValue("tray-status");
+    try {
+      await renderApp();
+      await act(async () => trayHost.listener!({ payload: {
+        action: "show", key: "gateway-error", level: "error", title: "Failed",
+        description: "Failure", target: "services", view_label: "查看",
+      } }));
+      const action = show.mock.calls[0]?.[1]?.action;
+      if (!action || typeof action !== "object" || !("onClick" in action)) {
+        throw new Error("missing toast action");
+      }
+      await act(async () => button("API 提供商").click());
+      await act(async () => button("添加 API 提供商").click());
+      await setInput("#service-name", "Unfinished service");
+      await act(async () => action.onClick({} as Parameters<typeof action.onClick>[0]));
+      expect(document.body.textContent).toContain("放弃未保存的修改？");
+      expect(workspaceHeading().textContent).toBe("添加 API 提供商");
+      expect(container.querySelector<HTMLInputElement>("#service-name")?.value).toBe("Unfinished service");
+    } finally {
+      show.mockRestore();
+    }
   });
 
   it("uses an in-app dialog before leaving an editor with unsaved changes", async () => {

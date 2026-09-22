@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
+import { appLog } from "./app-log";
 import { i18n } from "./i18n";
 import { notify } from "./notify";
 import type { RequestRecord } from "./request-record-model";
@@ -157,5 +158,5 @@ export function useDetachedInspector(
 }
 
 function reportFailure(error: unknown): void {
-  console.error("AstrLink trajectory inspector window failed", error);
+  appLog.error("ui.inspector", "AstrLink trajectory inspector window failed", error);
 }

@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { appLog } from "./app-log";
+
 import capabilityFixture from "../../../contracts/examples/capabilities.alpha.json";
 
 const invokeMock = vi.hoisted(() => vi.fn());
@@ -9,6 +11,7 @@ const downloadMocks = vi.hoisted(() => ({
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: invokeMock,
+  isTauri: () => false,
 }));
 vi.mock("./download-text-file", () => downloadMocks);
 
@@ -153,6 +156,19 @@ describe("desktop bridge contract", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(settled).toHaveBeenCalledTimes(1);
     await expect(result).rejects.toThrow("桌面程序长时间未响应");
+  });
+
+  it("keeps the command failure when writing the log throws", async () => {
+    const debug = vi.spyOn(appLog, "debug").mockImplementation(() => {
+      throw new Error("log failed");
+    });
+    const error = vi.spyOn(appLog, "error").mockImplementation(() => {
+      throw new Error("log failed");
+    });
+    invokeMock.mockRejectedValueOnce("native read failed");
+    await expect(getPreferences()).rejects.toThrow("native read failed");
+    debug.mockRestore();
+    error.mockRestore();
   });
 
   it.each([

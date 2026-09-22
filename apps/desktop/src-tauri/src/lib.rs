@@ -1,4 +1,5 @@
 mod agent_install;
+mod app_log;
 mod control_session;
 #[cfg(debug_assertions)]
 mod dev_reload;
@@ -8,6 +9,7 @@ mod preferences;
 mod recovery_path;
 mod sidecar;
 mod startup_window;
+mod tray_status;
 
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -173,6 +175,86 @@ fn settings_snapshot(app: &tauri::AppHandle, store: &PreferencesStore) -> Settin
 }
 
 #[tauri::command]
+fn append_app_log(level: String, target: String, message: String) -> Result<(), String> {
+    app_log::append_from_ui(&level, &target, &message)
+}
+
+#[derive(Debug, Serialize)]
+struct AppLogLocation {
+    path: String,
+}
+
+#[tauri::command]
+fn app_log_location(app: tauri::AppHandle) -> Result<AppLogLocation, String> {
+    let directory = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("unable to resolve AstrLink data directory: {error}"))?;
+    Ok(AppLogLocation {
+        path: app_log::log_file_path(&directory)
+            .to_string_lossy()
+            .into_owned(),
+    })
+}
+
+#[tauri::command]
+fn reveal_app_log(app: tauri::AppHandle) -> Result<(), String> {
+    let directory = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("unable to resolve AstrLink data directory: {error}"))?;
+    if let Err(error) = app_log::init(&directory) {
+        app_log::error!(
+            "shell.log",
+            "unable to initialize AstrLink log file: {error}"
+        );
+    }
+    let path = app_log::log_file_path(&directory);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("unable to create AstrLink log directory: {error}"))?;
+    }
+    if !path.exists() {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|error| format!("unable to create AstrLink log file: {error}"))?;
+    }
+    tauri_plugin_opener::reveal_item_in_dir(&path)
+        .map_err(|error| format!("unable to reveal AstrLink log file: {error}"))
+}
+
+#[tauri::command]
+fn list_app_logs() -> Vec<app_log::AppLogRecord> {
+    app_log::recent()
+}
+
+#[tauri::command]
+async fn tray_notice_ready(
+    window: tauri::WebviewWindow,
+    control: State<'_, tray_status::TrayControl>,
+) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("tray notices belong to the main window".to_string());
+    }
+    control.frontend_ready().await
+}
+
+#[tauri::command]
+async fn show_app_log_window(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(APP_LOG_WINDOW_LABEL) {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+        return Ok(());
+    }
+    tauri::async_runtime::spawn_blocking(move || build_app_log_window(&app))
+        .await
+        .map_err(|error| format!("unable to create the log window: {error}"))?
+}
+
+#[tauri::command]
 fn get_preferences(
     app: tauri::AppHandle,
     store: State<'_, Arc<PreferencesStore>>,
@@ -281,11 +363,17 @@ fn update_preferences(
     }
     manager.configure(&values);
     if let Err(error) = rebuild_tray_menu(&app, locale) {
-        eprintln!("unable to rebuild AstrLink tray menu: {error}");
+        app_log::error!(
+            "shell.tray",
+            "unable to rebuild AstrLink tray menu: {error}"
+        );
     }
     apply_native_theme(&app, values.theme);
     if let Err(error) = app.emit("theme-preference-changed", values.theme) {
-        eprintln!("unable to broadcast AstrLink theme: {error}");
+        app_log::error!(
+            "shell.window",
+            "unable to broadcast AstrLink theme: {error}"
+        );
     }
     Ok(settings_snapshot(&app, store.inner()))
 }
@@ -303,7 +391,10 @@ fn apply_native_theme(app: &tauri::AppHandle, preference: ThemePreference) {
         let theme = preference.native_theme().or_else(|| window.theme().ok());
         if let Some(theme) = theme {
             if let Err(error) = window.set_background_color(Some(theme_background(theme))) {
-                eprintln!("unable to update AstrLink window background: {error}");
+                app_log::error!(
+                    "shell.window",
+                    "unable to update AstrLink window background: {error}"
+                );
             }
         }
     }
@@ -339,12 +430,8 @@ fn tray_menu(app: &tauri::AppHandle, locale: Locale) -> tauri::Result<Menu<tauri
     Ok(menu)
 }
 
-fn rebuild_tray_menu(app: &tauri::AppHandle, locale: Locale) -> Result<(), String> {
-    let menu = tray_menu(app, locale).map_err(|error| error.to_string())?;
-    if let Some(tray) = app.tray_by_id("main") {
-        tray.set_menu(Some(menu))
-            .map_err(|error| error.to_string())?;
-    }
+fn rebuild_tray_menu(app: &tauri::AppHandle, _locale: Locale) -> Result<(), String> {
+    tray_status::nudge(app, tray_status::TrayMsg::Refresh);
     Ok(())
 }
 
@@ -354,6 +441,7 @@ fn show_main_window(app: &tauri::AppHandle) {
         let _ = window.unminimize();
         let _ = window.set_focus();
     }
+    tray_status::nudge(app, tray_status::TrayMsg::WindowShown);
 }
 
 /// The trajectory inspector lives in its own window so the phase list keeps the
@@ -362,6 +450,12 @@ fn show_main_window(app: &tauri::AppHandle) {
 ///
 /// Labels are suffixed because a pinned inspector freezes on its phase and the
 /// next click has to land in a window of its own.
+const APP_LOG_WINDOW_LABEL: &str = "app-log";
+const APP_LOG_WINDOW_WIDTH: f64 = 720.0;
+const APP_LOG_WINDOW_HEIGHT: f64 = 480.0;
+const APP_LOG_WINDOW_MIN_WIDTH: f64 = 480.0;
+const APP_LOG_WINDOW_MIN_HEIGHT: f64 = 320.0;
+
 const TRAJECTORY_INSPECTOR_LABEL_PREFIX: &str = "trajectory-inspector-";
 const TRAJECTORY_INSPECTOR_SELECT_EVENT: &str = "trajectory-inspector:select";
 
@@ -498,7 +592,11 @@ fn inspector_placement(
     (x, y)
 }
 
-fn inspector_anchor(main: &tauri::WebviewWindow, cascade: u32) -> Option<(f64, f64)> {
+fn window_anchor(
+    main: &tauri::WebviewWindow,
+    window_size: (f64, f64),
+    cascade: u32,
+) -> Option<(f64, f64)> {
     let scale = main.scale_factor().ok()?;
     let position = main.outer_position().ok()?.to_logical::<f64>(scale);
     let size = main.outer_size().ok()?.to_logical::<f64>(scale);
@@ -519,9 +617,17 @@ fn inspector_anchor(main: &tauri::WebviewWindow, cascade: u32) -> Option<(f64, f
             width: monitor_size.width,
             height: monitor_size.height,
         },
-        (TRAJECTORY_INSPECTOR_WIDTH, TRAJECTORY_INSPECTOR_HEIGHT),
+        window_size,
         cascade,
     ))
+}
+
+fn inspector_anchor(main: &tauri::WebviewWindow, cascade: u32) -> Option<(f64, f64)> {
+    window_anchor(
+        main,
+        (TRAJECTORY_INSPECTOR_WIDTH, TRAJECTORY_INSPECTOR_HEIGHT),
+        cascade,
+    )
 }
 
 fn inspector_registry<'a>(
@@ -664,7 +770,10 @@ fn close_unpinned_inspectors(app: &tauri::AppHandle) {
     let labels = match registry.lock() {
         Ok(mut guard) => guard.remove_unpinned(),
         Err(_) => {
-            eprintln!("inspector window registry is poisoned; unpinned windows stay open");
+            app_log::error!(
+                "shell.window",
+                "inspector window registry is poisoned; unpinned windows stay open"
+            );
             return;
         }
     };
@@ -739,6 +848,51 @@ fn build_inspector_window(app: &tauri::AppHandle, label: &str, cascade: u32) -> 
     Ok(())
 }
 
+fn build_app_log_window(app: &tauri::AppHandle) -> Result<(), String> {
+    let preferences = app
+        .try_state::<Arc<PreferencesStore>>()
+        .map(|store| store.snapshot().values)
+        .unwrap_or_default();
+    let locale = preferences.locale;
+    let theme = preferences
+        .theme
+        .native_theme()
+        .or_else(|| {
+            app.get_webview_window("main")
+                .and_then(|window| window.theme().ok())
+        })
+        .unwrap_or(tauri::Theme::Light);
+    let mut builder = WebviewWindowBuilder::new(app, APP_LOG_WINDOW_LABEL, WebviewUrl::default())
+        .title(i18n::t(locale, "host.window.appLog", &[]))
+        .background_color(theme_background(theme))
+        .inner_size(APP_LOG_WINDOW_WIDTH, APP_LOG_WINDOW_HEIGHT)
+        .min_inner_size(APP_LOG_WINDOW_MIN_WIDTH, APP_LOG_WINDOW_MIN_HEIGHT)
+        .resizable(true)
+        .shadow(true);
+
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder
+            .title_bar_style(tauri::TitleBarStyle::Overlay)
+            .hidden_title(true);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        builder = builder.decorations(false);
+    }
+
+    builder = match app
+        .get_webview_window("main")
+        .and_then(|main| window_anchor(&main, (APP_LOG_WINDOW_WIDTH, APP_LOG_WINDOW_HEIGHT), 0))
+    {
+        Some((x, y)) => builder.position(x, y),
+        None => builder.center(),
+    };
+
+    builder.build().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 #[tauri::command]
 async fn list_services(manager: State<'_, Arc<CoreManager>>) -> Result<serde_json::Value, String> {
     manager.list_services().await
@@ -770,29 +924,44 @@ async fn get_service(
 
 #[tauri::command]
 async fn create_service(
+    app: tauri::AppHandle,
     input: serde_json::Value,
     manager: State<'_, Arc<CoreManager>>,
 ) -> Result<ServiceRecordResponse, String> {
-    manager.create_service(input).await
+    let result = manager.create_service(input).await;
+    if result.is_ok() {
+        tray_status::nudge(&app, tray_status::TrayMsg::Refresh);
+    }
+    result
 }
 
 #[tauri::command]
 async fn update_service(
+    app: tauri::AppHandle,
     service_id: String,
     etag: String,
     patch: serde_json::Value,
     manager: State<'_, Arc<CoreManager>>,
 ) -> Result<ServiceRecordResponse, String> {
-    manager.update_service(&service_id, &etag, patch).await
+    let result = manager.update_service(&service_id, &etag, patch).await;
+    if result.is_ok() {
+        tray_status::nudge(&app, tray_status::TrayMsg::Refresh);
+    }
+    result
 }
 
 #[tauri::command]
 async fn delete_service(
+    app: tauri::AppHandle,
     service_id: String,
     etag: String,
     manager: State<'_, Arc<CoreManager>>,
 ) -> Result<(), String> {
-    manager.delete_service(&service_id, &etag).await
+    let result = manager.delete_service(&service_id, &etag).await;
+    if result.is_ok() {
+        tray_status::nudge(&app, tray_status::TrayMsg::Refresh);
+    }
+    result
 }
 
 #[tauri::command]
@@ -851,13 +1020,18 @@ async fn probe_draft_service_models(
 
 #[tauri::command]
 async fn begin_service_authorization(
+    app: tauri::AppHandle,
     service_id: String,
     flow: String,
     manager: State<'_, Arc<CoreManager>>,
 ) -> Result<serde_json::Value, String> {
-    manager
+    let result = manager
         .begin_service_authorization(&service_id, &flow)
-        .await
+        .await;
+    if result.is_ok() {
+        tray_status::nudge(&app, tray_status::TrayMsg::Refresh);
+    }
+    result
 }
 
 #[tauri::command]
@@ -877,14 +1051,19 @@ fn open_external_url(url: String) -> Result<(), String> {
 
 #[tauri::command]
 async fn complete_service_authorization(
+    app: tauri::AppHandle,
     service_id: String,
     session_id: String,
     code: String,
     manager: State<'_, Arc<CoreManager>>,
 ) -> Result<serde_json::Value, String> {
-    manager
+    let result = manager
         .complete_service_authorization(&service_id, &session_id, &code)
-        .await
+        .await;
+    if result.is_ok() {
+        tray_status::nudge(&app, tray_status::TrayMsg::Refresh);
+    }
+    result
 }
 
 #[tauri::command]
@@ -920,18 +1099,28 @@ async fn get_service_authorization(
 
 #[tauri::command]
 async fn cancel_service_authorization(
+    app: tauri::AppHandle,
     service_id: String,
     manager: State<'_, Arc<CoreManager>>,
 ) -> Result<serde_json::Value, String> {
-    manager.cancel_service_authorization(&service_id).await
+    let result = manager.cancel_service_authorization(&service_id).await;
+    if result.is_ok() {
+        tray_status::nudge(&app, tray_status::TrayMsg::Refresh);
+    }
+    result
 }
 
 #[tauri::command]
 async fn logout_service(
+    app: tauri::AppHandle,
     service_id: String,
     manager: State<'_, Arc<CoreManager>>,
 ) -> Result<ServiceRecordResponse, String> {
-    manager.logout_service(&service_id).await
+    let result = manager.logout_service(&service_id).await;
+    if result.is_ok() {
+        tray_status::nudge(&app, tray_status::TrayMsg::Refresh);
+    }
+    result
 }
 
 #[tauri::command]
@@ -1304,6 +1493,12 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             core_status,
             window_chrome_preferences,
+            append_app_log,
+            app_log_location,
+            list_app_logs,
+            tray_notice_ready,
+            reveal_app_log,
+            show_app_log_window,
             get_preferences,
             update_preferences,
             start_core,
@@ -1380,6 +1575,20 @@ pub fn run() {
             close_trajectory_inspectors
         ])
         .setup(move |app| {
+            match app.path().app_data_dir() {
+                Ok(directory) => {
+                    if let Err(error) = app_log::init(&directory) {
+                        eprintln!("unable to initialize AstrLink log file: {error}");
+                    }
+                }
+                Err(error) => {
+                    eprintln!("unable to resolve AstrLink data directory for logs: {error}");
+                }
+            }
+            let log_app = app.handle().clone();
+            app_log::set_publisher(move |record| {
+                let _ = log_app.emit("app-log-record", &record);
+            });
             let config_directory = app
                 .path()
                 .app_config_dir()
@@ -1389,7 +1598,10 @@ pub fn run() {
             apply_native_theme(app.handle(), values.theme);
             if let Some(window) = app.get_webview_window("main") {
                 if let Err(error) = startup_window::fit_to_monitor(&window) {
-                    eprintln!("failed to size AstrLink for the current display: {error}");
+                    app_log::error!(
+                        "shell.window",
+                        "failed to size AstrLink for the current display: {error}"
+                    );
                 }
                 window.show()?;
             }
@@ -1457,13 +1669,20 @@ pub fn run() {
                     _ => {}
                 })
                 .build(app)?;
+            app.manage(tray_status::spawn(
+                app.handle().clone(),
+                Arc::clone(&setup_manager),
+            ));
 
             #[cfg(debug_assertions)]
             dev_reload::start(app.handle());
 
             if let Ok(home) = control_session::user_home() {
                 if let Err(error) = agent_install::sync_installed_skills(&home) {
-                    eprintln!("failed to sync AstrLink agent skills: {error}");
+                    app_log::error!(
+                        "shell.agent",
+                        "failed to sync AstrLink agent skills: {error}"
+                    );
                 }
                 if let Ok(mcp_source) = agent_install::resolve_sidecar_binary("astrlink-mcp") {
                     if let Err(error) =
@@ -1472,14 +1691,17 @@ pub fn run() {
                             mcp_source,
                         })
                     {
-                        eprintln!("failed to sync AstrLink MCP binary: {error}");
+                        app_log::error!(
+                            "shell.agent",
+                            "failed to sync AstrLink MCP binary: {error}"
+                        );
                     }
                 }
             }
 
             if values.core_auto_start {
                 if let Err(error) = setup_manager.start(app.handle()) {
-                    eprintln!("failed to start astrlink-core: {error}");
+                    app_log::error!("shell.sidecar", "failed to start astrlink-core: {error}");
                 }
             }
             Ok(())
@@ -1496,8 +1718,21 @@ pub fn run() {
         {
             if let Some(window) = app_handle.get_webview_window(label) {
                 if let Err(error) = window.set_background_color(Some(theme_background(*theme))) {
-                    eprintln!("unable to follow AstrLink window theme: {error}");
+                    app_log::error!(
+                        "shell.window",
+                        "unable to follow AstrLink window theme: {error}"
+                    );
                 }
+            }
+        }
+        if let RunEvent::WindowEvent {
+            label,
+            event: WindowEvent::Focused(true),
+            ..
+        } = &event
+        {
+            if label == "main" {
+                tray_status::nudge(app_handle, tray_status::TrayMsg::WindowShown);
             }
         }
         if let RunEvent::WindowEvent {
@@ -1509,7 +1744,10 @@ pub fn run() {
             if let Some(registry) = app_handle.try_state::<Mutex<InspectorRegistry>>() {
                 match registry.lock() {
                     Ok(mut guard) => guard.remove(label),
-                    Err(_) => eprintln!("inspector window registry is poisoned; {label} leaked"),
+                    Err(_) => app_log::error!(
+                        "shell.window",
+                        "inspector window registry is poisoned; {label} leaked"
+                    ),
                 }
             }
         }
@@ -1545,7 +1783,10 @@ pub fn run() {
             if let Some(manager) = app_handle.try_state::<Arc<CoreManager>>() {
                 let manager = Arc::clone(manager.inner());
                 if let Err(error) = tauri::async_runtime::block_on(manager.stop_and_wait()) {
-                    eprintln!("astrlink-core did not stop cleanly during desktop exit: {error}");
+                    app_log::error!(
+                        "shell.sidecar",
+                        "astrlink-core did not stop cleanly during desktop exit: {error}"
+                    );
                 }
             }
         }

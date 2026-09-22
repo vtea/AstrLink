@@ -17,10 +17,14 @@ import App from "./App";
 import { AppErrorBoundary } from "./AppErrorBoundary";
 import { getPreferences } from "./bridge";
 import { applyLocale, i18n, useT } from "./i18n";
+import { AppLogsWindow } from "./AppLogsWindow";
 import { TrajectoryInspectorWindow } from "./TrajectoryInspectorWindow";
+import { isAppLogWindow } from "./app-log-window";
 import { isTrajectoryInspectorWindow } from "./trajectory-inspector-window";
 import { WindowChrome } from "./WindowChrome";
 import { getDesktopPlatform } from "./window-chrome";
+import { installAppActionLogs } from "./app-activity";
+import { appLog } from "./app-log";
 import { applyTheme, initializeTheme } from "./theme";
 import { isThemePreference } from "./theme-model";
 import "./styles/globals.css";
@@ -35,6 +39,7 @@ const desktopPlatform = getDesktopPlatform();
 document.documentElement.dataset.desktopPlatform = desktopPlatform;
 
 initializeTheme();
+installAppActionLogs();
 
 async function loadPreferences(): Promise<void> {
   let themeUpdated = false;
@@ -45,7 +50,9 @@ async function loadPreferences(): Promise<void> {
         themeUpdated = true;
         applyTheme(payload);
       }
-    }).catch((error) => console.error("Unable to observe AstrLink theme", error));
+    }).catch((error) =>
+      appLog.error("ui.theme", "Unable to observe AstrLink theme", error),
+    );
   }
   const settings = await getPreferences();
   if (!themeUpdated) applyTheme(settings.values.theme);
@@ -65,6 +72,8 @@ function LocaleGate({ children }: { children: ReactNode }) {
 // Every window loads this bundle; the label decides which app it becomes.
 const surface = isTrajectoryInspectorWindow() ? (
   <TrajectoryInspectorWindow />
+) : isAppLogWindow() ? (
+  <AppLogsWindow />
 ) : (
   <App />
 );
