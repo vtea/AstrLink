@@ -19,8 +19,10 @@ const MAX_MESSAGE_BYTES: usize = 4096;
 const ROTATE_AFTER: u64 = 2 * 1024 * 1024;
 const MAX_TARGET_LEN: usize = 64;
 
+type LogPublisher = Arc<dyn Fn(AppLogRecord) + Send + Sync>;
+
 static LOGGER: Mutex<Logger> = Mutex::new(Logger::new());
-static PUBLISHER: Mutex<Option<Arc<dyn Fn(AppLogRecord) + Send + Sync>>> = Mutex::new(None);
+static PUBLISHER: Mutex<Option<LogPublisher>> = Mutex::new(None);
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct AppLogRecord {

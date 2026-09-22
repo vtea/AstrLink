@@ -164,21 +164,11 @@ pub enum EpochChange {
     Left,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ReadyEpoch {
     pub epoch: u64,
     was_ready: bool,
     pid: Option<u32>,
-}
-
-impl Default for ReadyEpoch {
-    fn default() -> Self {
-        Self {
-            epoch: 0,
-            was_ready: false,
-            pid: None,
-        }
-    }
 }
 
 impl ReadyEpoch {
@@ -626,6 +616,7 @@ pub fn spawn(app: tauri::AppHandle, manager: std::sync::Arc<CoreManager>) -> Tra
     TrayControl { tx }
 }
 
+#[derive(Default)]
 struct TrayRuntime {
     epoch: ReadyEpoch,
     upstream: UpstreamMemory,
@@ -638,24 +629,6 @@ struct TrayRuntime {
     pending: Option<TrayNotice>,
     delivered: bool,
     frontend_ready: bool,
-}
-
-impl Default for TrayRuntime {
-    fn default() -> Self {
-        Self {
-            epoch: ReadyEpoch::default(),
-            upstream: UpstreamMemory::default(),
-            inflight: None,
-            next_request: 0,
-            last_fetch: None,
-            force: false,
-            applied: None,
-            notices: NoticeMemory::default(),
-            pending: None,
-            delivered: false,
-            frontend_ready: false,
-        }
-    }
 }
 
 impl TrayRuntime {
@@ -948,8 +921,10 @@ mod tests {
         )
         .notice
         .unwrap();
-        let mut runtime = TrayRuntime::default();
-        runtime.pending = Some(notice.clone());
+        let mut runtime = TrayRuntime {
+            pending: Some(notice.clone()),
+            ..TrayRuntime::default()
+        };
         runtime.handle(TrayMsg::WindowShown);
         assert!(runtime.notice_to_deliver().is_none());
         runtime.handle(TrayMsg::FrontendReady);
