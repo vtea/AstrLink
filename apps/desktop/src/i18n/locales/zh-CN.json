@@ -403,6 +403,25 @@
       "bodyBody": "默认只记录请求信息与执行轨迹，不捕获请求和响应正文。需要分析正文时，请到“请求记录”手动开启正文捕获，再重新发起请求。"
     },
     "pathsTitle": "查看将写入的位置",
+    "reviewModel": {
+      "title": "Codex 自动审批模型",
+      "description": "Codex“帮我批准”审查越权操作时使用的模型。",
+      "field": "审批模型",
+      "hint": "候选模型来自已启用的 API 服务，任何提供商的模型都可以选择。",
+      "followSession": "跟随当前会话模型",
+      "currentOverride": "当前：{{model}}",
+      "currentSession": "当前：跟随会话模型",
+      "currentAutoReview": "当前：codex-auto-review",
+      "autoReviewWarning": "Codex 默认使用 codex-auto-review 审批，已启用的服务都没有提供这个模型，审批请求会失败。请选择一个可用模型。",
+      "notInServices": "{{model}}（不在已启用服务中）",
+      "noServices": "暂无已启用服务的模型，可以先选择跟随当前会话模型。",
+      "save": "保存",
+      "saving": "正在保存…",
+      "confirmTitle": "修改 Codex 审批模型？",
+      "confirmBody": "将把 Codex 自动审批模型设为“{{model}}”。原文件会先备份到同一目录，重启 Codex 后生效。",
+      "confirmPinsCatalog": "保存后会改用本地模型目录，之后 Codex 内置目录的更新不会自动生效。",
+      "notifySaved": "已保存。重启 Codex 后生效。"
+    },
     "tools": {
       "cursor": "Cursor",
       "claude": "Claude Code",

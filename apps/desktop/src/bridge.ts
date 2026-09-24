@@ -134,6 +134,10 @@ import {
   type AgentInstallStatus,
   type AgentToolId,
 } from "./agent-install-model";
+import {
+  parseCodexReviewModelStatus,
+  type CodexReviewModelStatus,
+} from "./codex-review-model";
 
 function hasNativeBridge(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -144,7 +148,11 @@ function hasNativeBridge(): boolean {
 // diagnosis then reads "无法读取…" no matter whether Core was unreachable or
 // returned a field the interface refused. Carrying the reason across keeps the
 // specific message on screen.
-const QUIET_COMMANDS = new Set(["append_app_log", "list_app_logs", "core_status"]);
+const QUIET_COMMANDS = new Set([
+  "append_app_log",
+  "list_app_logs",
+  "core_status",
+]);
 
 async function invoke<T>(
   ...call: Parameters<typeof invokeCommand>
@@ -254,7 +262,8 @@ export async function listAppLogs(): Promise<AppLogRecord[]> {
     if (!item || typeof item !== "object") return [];
     const record = item as AppLogRecord;
     if (
-      !Number.isSafeInteger(record.sequence) || record.sequence < 1 ||
+      !Number.isSafeInteger(record.sequence) ||
+      record.sequence < 1 ||
       typeof record.time !== "string" ||
       typeof record.level !== "string" ||
       typeof record.target !== "string" ||
@@ -291,7 +300,9 @@ export async function updatePreferences(
  */
 export async function getTrayState(tray?: TrayPreferences): Promise<TrayState> {
   requireNativeBridge();
-  return parseTrayState(await invoke<unknown>("tray_state", { tray: tray ?? null }));
+  return parseTrayState(
+    await invoke<unknown>("tray_state", { tray: tray ?? null }),
+  );
 }
 
 export async function trayAction(action: TrayAction): Promise<void> {
@@ -878,6 +889,22 @@ export async function installAgentDebug(
 export async function uninstallAgentDebug(): Promise<void> {
   requireNativeBridge();
   await invoke("uninstall_agent_debug");
+}
+
+export async function getCodexReviewModelStatus(): Promise<CodexReviewModelStatus> {
+  requireNativeBridge();
+  return parseCodexReviewModelStatus(
+    await invoke<unknown>("codex_review_model_status"),
+  );
+}
+
+export async function setCodexReviewModel(
+  model: string | null,
+): Promise<CodexReviewModelStatus> {
+  requireNativeBridge();
+  return parseCodexReviewModelStatus(
+    await invoke<unknown>("set_codex_review_model", { model }),
+  );
 }
 
 export async function saveTextFile(

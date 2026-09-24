@@ -403,6 +403,25 @@
       "bodyBody": "By default, only request metadata and execution traces are recorded. To inspect request and response bodies, enable body capture in Request records, then send the request again."
     },
     "pathsTitle": "View installation locations",
+    "reviewModel": {
+      "title": "Codex auto-review model",
+      "description": "The model Codex “Approve for me” uses to review escalated actions.",
+      "field": "Review model",
+      "hint": "Candidates come from enabled API services, so any provider's model can be used.",
+      "followSession": "Follow the session model",
+      "currentOverride": "Current: {{model}}",
+      "currentSession": "Current: follows the session model",
+      "currentAutoReview": "Current: codex-auto-review",
+      "autoReviewWarning": "Codex reviews with codex-auto-review by default. No enabled service provides that model, so approval requests will fail. Choose an available model.",
+      "notInServices": "{{model}} (not in enabled services)",
+      "noServices": "No enabled service models yet. You can follow the session model for now.",
+      "save": "Save",
+      "saving": "Saving…",
+      "confirmTitle": "Change the Codex review model?",
+      "confirmBody": "Codex auto-review will use “{{model}}”. The original files are backed up in the same directory first. Restart Codex to apply.",
+      "confirmPinsCatalog": "This points Codex at a local catalog file. Later built-in catalog updates will not apply automatically.",
+      "notifySaved": "Saved. Restart Codex to apply."
+    },
     "tools": {
       "cursor": "Cursor",
       "claude": "Claude Code",

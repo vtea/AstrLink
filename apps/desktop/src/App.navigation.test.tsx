@@ -8,22 +8,26 @@ import type { TrayNoticeEvent } from "./tray-notices";
 
 const trayHost = vi.hoisted(() => ({
   native: false,
-  listener: undefined as undefined | ((event: { payload: TrayNoticeEvent }) => void),
+  listener: undefined as
+    | undefined
+    | ((event: { payload: TrayNoticeEvent }) => void),
 }));
 vi.mock("@tauri-apps/api/core", async (importOriginal) => ({
-  ...await importOriginal<typeof import("@tauri-apps/api/core")>(),
+  ...(await importOriginal<typeof import("@tauri-apps/api/core")>()),
   isTauri: () => trayHost.native,
   invoke: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock("@tauri-apps/api/event", async (importOriginal) => ({
-  ...await importOriginal<typeof import("@tauri-apps/api/event")>(),
+  ...(await importOriginal<typeof import("@tauri-apps/api/event")>()),
   listen: vi.fn(async (event, listener) => {
     if (event === "tray-status-notice") trayHost.listener = listener;
-    return () => { if (trayHost.listener === listener) trayHost.listener = undefined; };
+    return () => {
+      if (trayHost.listener === listener) trayHost.listener = undefined;
+    };
   }),
 }));
 vi.mock("@tauri-apps/api/window", async (importOriginal) => ({
-  ...await importOriginal<typeof import("@tauri-apps/api/window")>(),
+  ...(await importOriginal<typeof import("@tauri-apps/api/window")>()),
   getCurrentWindow: () => ({
     isVisible: async () => true,
     onFocusChanged: async () => () => {},
@@ -40,12 +44,15 @@ const bridgeMocks = vi.hoisted(() => ({
   deleteRoute: vi.fn(),
   deletePrivacyModelInstallation: vi.fn(),
   getAgentDebugStatus: vi.fn(),
+  getCodexReviewModelStatus: vi.fn(),
   getAuditSettings: vi.fn(),
   getCoreStatus: vi.fn(),
   getAppLogLocation: vi.fn(),
   getPreferences: vi.fn(),
   revealAppLog: vi.fn(),
-  getTrayState: vi.fn().mockRejectedValue(new Error("tray unavailable in tests")),
+  getTrayState: vi
+    .fn()
+    .mockRejectedValue(new Error("tray unavailable in tests")),
   trayAction: vi.fn().mockRejectedValue(new Error("tray unavailable in tests")),
   getRoutingSettings: vi.fn(),
   getServiceOrder: vi
@@ -94,6 +101,7 @@ const bridgeMocks = vi.hoisted(() => ({
   openAuthorizationURL: vi.fn(),
   probeDraftServiceModels: vi.fn(),
   probeServiceModels: vi.fn(),
+  setCodexReviewModel: vi.fn(),
 }));
 
 vi.mock("./bridge", () => bridgeMocks);
@@ -423,6 +431,26 @@ describe("App workspace navigation", () => {
         },
       ],
       shared_paths: [],
+    });
+    bridgeMocks.getCodexReviewModelStatus.mockResolvedValue({
+      detected: true,
+      config_path: "/tmp/.codex/config.toml",
+      catalog_path: "/tmp/.codex/model-catalog.json",
+      catalog_configured: true,
+      catalog_exists: true,
+      session_model: "gpt-5",
+      state: { kind: "override", model: "gpt-5" },
+      preview_paths: ["/tmp/.codex/model-catalog.json"],
+    });
+    bridgeMocks.setCodexReviewModel.mockResolvedValue({
+      detected: true,
+      config_path: "/tmp/.codex/config.toml",
+      catalog_path: "/tmp/.codex/model-catalog.json",
+      catalog_configured: true,
+      catalog_exists: true,
+      session_model: "gpt-5",
+      state: { kind: "override", model: "gpt-5" },
+      preview_paths: ["/tmp/.codex/model-catalog.json"],
     });
     container = document.createElement("div");
     document.body.append(container);
@@ -901,10 +929,19 @@ describe("App workspace navigation", () => {
     const show = vi.spyOn(toast, "error").mockReturnValue("tray-status");
     try {
       await renderApp();
-      await act(async () => trayHost.listener!({ payload: {
-        action: "show", key: "gateway-error", level: "error", title: "Failed",
-        description: "Failure", target: "services", view_label: "查看",
-      } }));
+      await act(async () =>
+        trayHost.listener!({
+          payload: {
+            action: "show",
+            key: "gateway-error",
+            level: "error",
+            title: "Failed",
+            description: "Failure",
+            target: "services",
+            view_label: "查看",
+          },
+        }),
+      );
       const action = show.mock.calls[0]?.[1]?.action;
       if (!action || typeof action !== "object" || !("onClick" in action)) {
         throw new Error("missing toast action");
@@ -912,10 +949,14 @@ describe("App workspace navigation", () => {
       await act(async () => button("API 提供商").click());
       await act(async () => button("添加 API 提供商").click());
       await setInput("#service-name", "Unfinished service");
-      await act(async () => action.onClick({} as Parameters<typeof action.onClick>[0]));
+      await act(async () =>
+        action.onClick({} as Parameters<typeof action.onClick>[0]),
+      );
       expect(document.body.textContent).toContain("放弃未保存的修改？");
       expect(workspaceHeading().textContent).toBe("添加 API 提供商");
-      expect(container.querySelector<HTMLInputElement>("#service-name")?.value).toBe("Unfinished service");
+      expect(
+        container.querySelector<HTMLInputElement>("#service-name")?.value,
+      ).toBe("Unfinished service");
     } finally {
       show.mockRestore();
     }

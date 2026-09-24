@@ -8,6 +8,9 @@ const bridge = vi.hoisted(() => ({
   getAgentDebugStatus: vi.fn(),
   installAgentDebug: vi.fn(),
   uninstallAgentDebug: vi.fn(),
+  getCodexReviewModelStatus: vi.fn(),
+  setCodexReviewModel: vi.fn(),
+  listServices: vi.fn(),
 }));
 vi.mock("./bridge", () => bridge);
 
@@ -88,6 +91,19 @@ describe("AgentDebugSettings", () => {
       files: status.shared_paths,
     });
     bridge.uninstallAgentDebug.mockReset().mockResolvedValue(undefined);
+    bridge.getCodexReviewModelStatus.mockReset().mockResolvedValue({
+      detected: true,
+      config_path: "/tmp/.codex/config.toml",
+      catalog_path: "/tmp/.codex/model-catalog.json",
+      catalog_configured: true,
+      catalog_exists: true,
+      session_model: "gpt-6-astra",
+      state: { kind: "session_model" },
+      preview_paths: ["/tmp/.codex/model-catalog.json"],
+    });
+    bridge.listServices
+      .mockReset()
+      .mockResolvedValue({ items: [], next_cursor: null });
     notifyMocks.success.mockReset();
     notifyMocks.error.mockReset();
   });

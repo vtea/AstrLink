@@ -64,7 +64,9 @@ import {
   openAuthorizationURL,
   saveTextFile,
   getAgentDebugStatus,
+  getCodexReviewModelStatus,
   installAgentDebug,
+  setCodexReviewModel,
   uninstallAgentDebug,
 } from "./bridge";
 import { defaultPrivacyKindRules } from "./privacy-policy-model";
@@ -99,6 +101,34 @@ function validSnapshot(): Record<string, unknown> {
 }
 
 describe("desktop bridge contract", () => {
+  it("roundtrips Codex review-model status and forwards the selected model", async () => {
+    const status = {
+      detected: true,
+      config_path: "/tmp/.codex/config.toml",
+      catalog_path: "/tmp/.codex/model-catalog.json",
+      catalog_configured: true,
+      catalog_exists: true,
+      session_model: "gpt-6-astra",
+      state: { kind: "override", model: "gpt-6-astra" },
+      preview_paths: ["/tmp/.codex/model-catalog.json"],
+    };
+    invokeMock.mockResolvedValueOnce(status);
+    await expect(getCodexReviewModelStatus()).resolves.toEqual(status);
+    expect(invokeMock).toHaveBeenLastCalledWith("codex_review_model_status");
+
+    invokeMock.mockResolvedValueOnce(status);
+    await expect(setCodexReviewModel("gpt-6-astra")).resolves.toEqual(status);
+    expect(invokeMock).toHaveBeenLastCalledWith("set_codex_review_model", {
+      model: "gpt-6-astra",
+    });
+
+    invokeMock.mockResolvedValueOnce(status);
+    await expect(setCodexReviewModel(null)).resolves.toEqual(status);
+    expect(invokeMock).toHaveBeenLastCalledWith("set_codex_review_model", {
+      model: null,
+    });
+  });
+
   it("requests one aggregate for the complete usage window", async () => {
     const window = resolveUsageWindow("1d", new Date(2026, 8, 19, 12));
     invokeMock.mockResolvedValueOnce({
@@ -935,7 +965,9 @@ describe("desktop bridge contract", () => {
       fresh: false,
     });
     invokeMock.mockResolvedValueOnce(usage);
-    await expect(getServiceUsage(service.id, { fresh: true })).resolves.toEqual(usage);
+    await expect(getServiceUsage(service.id, { fresh: true })).resolves.toEqual(
+      usage,
+    );
     expect(invokeMock).toHaveBeenLastCalledWith("get_service_usage", {
       serviceId: service.id,
       fresh: true,

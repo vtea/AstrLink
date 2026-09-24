@@ -31,6 +31,7 @@ const migratedSources = [
   "ServiceModelsEditor.tsx",
   "SettingsCenter.tsx",
   "AgentDebugSettings.tsx",
+  "CodexReviewModelPanel.tsx",
   "components/AppShell.tsx",
   "components/ChoiceCard.tsx",
   "components/ConfirmDialog.tsx",

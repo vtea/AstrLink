@@ -1,5 +1,6 @@
 mod agent_install;
 mod app_log;
+mod codex_review_model;
 mod control_session;
 #[cfg(debug_assertions)]
 mod dev_reload;
@@ -295,6 +296,30 @@ fn install_agent_debug(
 #[tauri::command]
 fn uninstall_agent_debug() -> Result<(), String> {
     agent_install::uninstall(&agent_install_context()?)
+}
+
+#[tauri::command]
+async fn codex_review_model_status() -> Result<codex_review_model::CodexReviewModelStatus, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let home = control_session::user_home()?;
+        codex_review_model::status(&home)
+    })
+    .await
+    .map_err(|error| format!("unable to read Codex review model status: {error}"))?
+}
+
+#[tauri::command]
+async fn set_codex_review_model(
+    model: Option<String>,
+) -> Result<codex_review_model::CodexReviewModelStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let home = control_session::user_home()?;
+        codex_review_model::set_review_model(&home, model.as_deref(), || {
+            codex_review_model::bundled_catalog_from_codex(&home)
+        })
+    })
+    .await
+    .map_err(|error| format!("unable to set Codex review model: {error}"))?
 }
 
 #[tauri::command]
@@ -1666,6 +1691,8 @@ pub fn run() {
             agent_debug_status,
             install_agent_debug,
             uninstall_agent_debug,
+            codex_review_model_status,
+            set_codex_review_model,
             show_trajectory_inspector,
             update_trajectory_inspector,
             trajectory_inspector_state,

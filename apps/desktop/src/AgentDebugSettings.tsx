@@ -27,6 +27,7 @@ import {
   uninstallAgentDebug,
 } from "./bridge";
 import type { AgentInstallStatus, AgentToolId } from "./agent-install-model";
+import { CodexReviewModelPanel } from "./CodexReviewModelPanel";
 import { i18n, useT } from "./i18n";
 import { notify } from "./notify";
 import { PageHeader } from "./PageHeader";
@@ -309,6 +310,12 @@ export function AgentDebugSettings() {
                 </div>
               </PanelFooter>
             </Panel>
+
+            {status?.tools.some(
+              (tool) => tool.id === "codex" && tool.detected,
+            ) ? (
+              <CodexReviewModelPanel />
+            ) : null}
 
             <Panel className="p-4" tone="inset">
               <CopyableValue
