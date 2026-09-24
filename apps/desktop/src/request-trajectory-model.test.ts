@@ -261,8 +261,8 @@ describe("request trajectory model", () => {
       ["UPSTREAM", "upstream", "ok", "HTTP 200"],
       ["RESULT", "client", "cancelled", "客户端断开"],
     ]);
-    expect(rows.find((row) => row.chip === "RESULT")?.summary).toContain(
-      "HTTP 200",
+    expect(rows.find((row) => row.chip === "RESULT")?.summary).toBe(
+      "HTTP 200 · 输入 23,973 Token · 输出 151 Token",
     );
     const phases = timelinePhases(
       trajectoryTimeline(rows, Date.parse(aborted.completed_at ?? "")),
@@ -944,6 +944,30 @@ describe("request trajectory model", () => {
     expect(
       inspectorChainRows(record).some((row) => row.requestId === child.id),
     ).toBe(false);
+  });
+
+  it("keeps each rejected provider its own row when they share an instant", () => {
+    const at = record.started_at;
+    const rejected: RequestRecord = {
+      ...record,
+      status: "failed",
+      service_id: null,
+      http_status: 503,
+      events: (["service_a", "service_b"] as const).map((id) => ({
+        kind: "routed" as const,
+        started_at: at,
+        ended_at: at,
+        status: "failed" as const,
+        summary: `${id} · circuit_open`,
+        attempt_index: 0,
+      })),
+    };
+    const routes = inspectorChainRows(rejected);
+    expect(routes.map((row) => [row.summary, row.tone])).toEqual([
+      ["service_a · circuit_open", "failed"],
+      ["service_b · circuit_open", "failed"],
+    ]);
+    expect(new Set(routes.map((row) => row.id)).size).toBe(2);
   });
 
   it("maps trajectory chips to inspector audit parts", () => {

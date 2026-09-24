@@ -60,6 +60,7 @@ const POLICY_DRY_RUN_PATH: &str = "/control/v1/policies/policy_privacy_default/d
 const ROUTES_PATH: &str = "/control/v1/routes";
 const SERVICES_PATH: &str = "/control/v1/services";
 const SERVICE_MODEL_PROBES_PATH: &str = "/control/v1/service-model-probes";
+const SERVICE_PROXY_PROBES_PATH: &str = "/control/v1/service-proxy-probes";
 // Every kind a detector may emit. The Regex detector emits the first seven and
 // the local model adds the rest.
 const PRIVACY_KINDS: &[&str] = &[
@@ -1812,6 +1813,23 @@ impl CoreManager {
             .map_err(|error| format!("draft service model probe returned invalid JSON: {error}"))
     }
 
+    pub async fn probe_service_proxy(
+        &self,
+        input: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        crate::service_proxy::validate_proxy(&input["proxy"], None, true)?;
+        if input["proxy"]["mode"].as_str() != Some("custom") {
+            return Err("proxy test requires a custom proxy".into());
+        }
+        if let Some(id) = input.get("service_id") {
+            validate_resource_id(id.as_str().ok_or("invalid service id")?)?;
+        }
+        let (_, body) = self
+            .authenticated_control(Method::POST, SERVICE_PROXY_PROBES_PATH, Some(input), None)
+            .await?;
+        serde_json::from_slice(&body).map_err(|_| "proxy probe returned invalid JSON".into())
+    }
+
     pub async fn begin_service_authorization(
         &self,
         service_id: &str,
@@ -2497,6 +2515,7 @@ fn control_request_timeout(method: &Method, path: &str) -> Duration {
     }
     if method == Method::POST
         && (path == SERVICE_MODEL_PROBES_PATH
+            || path == SERVICE_PROXY_PROBES_PATH
             || (path.starts_with(&format!("{SERVICES_PATH}/")) && path.ends_with("/probe-models")))
     {
         return SERVICE_MODEL_PROBE_TIMEOUT;
@@ -3068,6 +3087,8 @@ fn validate_privacy_policy_value(policy: &serde_json::Value) -> Result<(), Strin
             "response_restore",
             "restore_tool_arguments",
             "placeholder_notice",
+            "skip_tool_declarations",
+            "inspect_additional_tools",
         ],
         &[
             "id",
@@ -3137,7 +3158,12 @@ fn validate_privacy_policy_value(policy: &serde_json::Value) -> Result<(), Strin
     if let Some(allowlist_rules) = object.get("allowlist_rules") {
         validate_privacy_allowlist_rules(allowlist_rules)?;
     }
-    for field in ["restore_tool_arguments", "placeholder_notice"] {
+    for field in [
+        "restore_tool_arguments",
+        "placeholder_notice",
+        "skip_tool_declarations",
+        "inspect_additional_tools",
+    ] {
         if let Some(value) = object.get(field) {
             if !value.is_boolean() {
                 return Err(format!("privacy policy {field} must be a boolean"));
@@ -3255,6 +3281,11 @@ fn validate_privacy_policy_patch(patch: serde_json::Value) -> Result<serde_json:
             "response_restore" if value.is_boolean() => {}
             "restore_tool_arguments" if value.is_boolean() => {}
             "placeholder_notice" if value.is_boolean() => {}
+            "skip_tool_declarations" | "inspect_additional_tools" => {
+                if !value.is_boolean() {
+                    return Err(format!("privacy policy {field} patch must be a boolean"));
+                }
+            }
             "enabled" => {
                 return Err("privacy policy enabled patch must be a boolean".to_string());
             }
@@ -3632,8 +3663,12 @@ fn parse_privacy_model_probe(body: &[u8]) -> Result<serde_json::Value, String> {
     let mut seen = HashSet::new();
     let mut requires_label_mapping = false;
     for label in labels {
-        validate_exact_object_keys(
+        let label = label
+            .as_object()
+            .ok_or_else(|| "privacy model probe label must be an object".to_string())?;
+        validate_allowed_object_keys(
             label,
+            &["label", "suggested_kind", "suggested_ignore"],
             &["label", "suggested_kind"],
             "privacy model probe label",
         )?;
@@ -3641,9 +3676,20 @@ fn parse_privacy_model_probe(body: &[u8]) -> Result<serde_json::Value, String> {
         if !seen.insert(source_label) {
             return Err("privacy model probe contains duplicate labels".to_string());
         }
+        let suggested_ignore = match label.get("suggested_ignore") {
+            None => false,
+            Some(value) => value.as_bool().ok_or_else(|| {
+                "privacy model probe label suggested_ignore must be boolean".to_string()
+            })?,
+        };
         if label["suggested_kind"].is_null() {
-            requires_label_mapping = true;
+            requires_label_mapping |= !suggested_ignore;
         } else {
+            if suggested_ignore {
+                return Err(
+                    "privacy model probe label suggestion cannot map and ignore".to_string()
+                );
+            }
             validate_canonical_privacy_kind(&label["suggested_kind"])?;
         }
     }
@@ -4021,9 +4067,12 @@ fn validate_canonical_privacy_kind(value: &serde_json::Value) -> Result<(), Stri
 
 fn validate_privacy_model_adapter(value: &serde_json::Value) -> Result<(), String> {
     match value.as_str() {
-        Some("openai_bioes_viterbi" | "hf_token_classification" | "astrlink_sensitive_guard") => {
-            Ok(())
-        }
+        Some(
+            "openai_bioes_viterbi"
+            | "hf_token_classification"
+            | "pplx_bioes_viterbi"
+            | "astrlink_sensitive_guard",
+        ) => Ok(()),
         _ => Err("privacy model adapter is invalid".to_string()),
     }
 }
@@ -4648,7 +4697,7 @@ fn build_request_record_query(query: &serde_json::Value) -> Result<String, Strin
     let mut to: Option<&str> = None;
     let mut protocol: Option<&str> = None;
     let mut service_id: Option<&str> = None;
-    let mut local_access_token_id: Option<&str> = None;
+    let mut local_access_token_ids: Vec<&str> = Vec::new();
     let mut status: Option<&str> = None;
 
     for (key, value) in object {
@@ -4718,12 +4767,19 @@ fn build_request_record_query(query: &serde_json::Value) -> Result<String, Strin
                 validate_resource_id(text)?;
                 service_id = Some(text);
             }
-            "local_access_token_id" => {
-                let text = value.as_str().ok_or_else(|| {
-                    "request record query local_access_token_id must be a string".to_string()
+            "local_access_token_ids" => {
+                let values = value.as_array().ok_or_else(|| {
+                    "request record query local_access_token_ids must be an array of strings"
+                        .to_string()
                 })?;
-                validate_resource_id(text)?;
-                local_access_token_id = Some(text);
+                for value in values {
+                    let text = value.as_str().ok_or_else(|| {
+                        "request record query local_access_token_ids must be an array of strings"
+                            .to_string()
+                    })?;
+                    validate_resource_id(text)?;
+                    local_access_token_ids.push(text);
+                }
             }
             "status" => {
                 let text = value
@@ -4761,7 +4817,7 @@ fn build_request_record_query(query: &serde_json::Value) -> Result<String, Strin
     if let Some(value) = service_id {
         pairs.push(format!("service_id={}", percent_encode_query(value)));
     }
-    if let Some(value) = local_access_token_id {
+    for value in local_access_token_ids {
         pairs.push(format!(
             "local_access_token_id={}",
             percent_encode_query(value)
@@ -5584,6 +5640,16 @@ mod tests {
             "?cursor=a%2Bb&kind=discovery"
         );
         assert_eq!(
+            build_request_session_query(&serde_json::json!({
+                "kind": "inference",
+                "service_id": "service_01",
+                "local_access_token_ids": ["token_01", "token_02"],
+                "status": "succeeded"
+            }))
+            .unwrap(),
+            "?service_id=service_01&local_access_token_id=token_01&local_access_token_id=token_02&status=succeeded&kind=inference"
+        );
+        assert_eq!(
             build_request_session_query(&serde_json::json!({})).unwrap(),
             ""
         );
@@ -5607,7 +5673,7 @@ mod tests {
             build_request_record_query(&serde_json::json!({
                 "status": "succeeded",
                 "service_id": "service_01",
-                "local_access_token_id": "token_01",
+                "local_access_token_ids": ["token_01", "token_02"],
                 "protocol": "openai_responses",
                 "to": "2026-07-25T12:00:00Z",
                 "from": "2026-07-24T00:00:00Z",
@@ -5615,13 +5681,26 @@ mod tests {
                 "limit": 50
             }))
             .unwrap(),
-            "?limit=50&cursor=a%2Bb%3Dc%26d%2Fe&from=2026-07-24T00%3A00%3A00Z&to=2026-07-25T12%3A00%3A00Z&protocol=openai_responses&service_id=service_01&local_access_token_id=token_01&status=succeeded"
+            "?limit=50&cursor=a%2Bb%3Dc%26d%2Fe&from=2026-07-24T00%3A00%3A00Z&to=2026-07-25T12%3A00%3A00Z&protocol=openai_responses&service_id=service_01&local_access_token_id=token_01&local_access_token_id=token_02&status=succeeded"
         );
         assert!(
             build_request_record_query(&serde_json::json!({"unknown": 1}))
                 .unwrap_err()
                 .contains("unknown")
         );
+        assert!(build_request_record_query(&serde_json::json!({
+            "local_access_token_id": "token_01"
+        }))
+        .unwrap_err()
+        .contains("unknown key local_access_token_id"));
+        assert!(build_request_record_query(&serde_json::json!({
+            "local_access_token_ids": "token_01"
+        }))
+        .is_err());
+        assert!(build_request_record_query(&serde_json::json!({
+            "local_access_token_ids": ["token_01", 2]
+        }))
+        .is_err());
         assert!(build_request_record_query(&serde_json::json!({"limit": 0})).is_err());
         assert!(build_request_record_query(&serde_json::json!({"limit": 201})).is_err());
         assert!(build_request_record_query(&serde_json::json!({"status": "ok"})).is_err());
@@ -5918,8 +5997,36 @@ mod tests {
             "response_action": "allow",
             "response_restore": true,
             "restore_tool_arguments": true,
-            "placeholder_notice": true
+            "placeholder_notice": true,
+            "skip_tool_declarations": false,
+            "inspect_additional_tools": false
         })
+    }
+
+    #[test]
+    fn privacy_policy_tool_declarations_require_booleans() {
+        for field in ["skip_tool_declarations", "inspect_additional_tools"] {
+            for value in [serde_json::json!(false), serde_json::json!(true)] {
+                let mut policy = privacy_policy_value();
+                policy[field] = value.clone();
+                assert_eq!(
+                    parse_privacy_policy(&serde_json::to_vec(&policy).unwrap()).unwrap()[field],
+                    value
+                );
+                let patch = serde_json::json!({field: value});
+                assert_eq!(validate_privacy_policy_patch(patch.clone()).unwrap(), patch);
+            }
+            for value in [
+                serde_json::Value::Null,
+                serde_json::json!("false"),
+                serde_json::json!(0),
+            ] {
+                let mut policy = privacy_policy_value();
+                policy[field] = value.clone();
+                assert!(parse_privacy_policy(&serde_json::to_vec(&policy).unwrap()).is_err());
+                assert!(validate_privacy_policy_patch(serde_json::json!({field: value})).is_err());
+            }
+        }
     }
 
     #[test]
@@ -6388,6 +6495,7 @@ mod tests {
 
     #[test]
     fn strictly_parses_privacy_model_catalog_probe_and_installations() {
+        assert!(validate_privacy_model_adapter(&serde_json::json!("pplx_bioes_viterbi")).is_ok());
         let catalog = serde_json::to_vec(&serde_json::json!({
             "items": [{
                 "id": "catalog_example_privacy",
@@ -6436,6 +6544,61 @@ mod tests {
         let mut leaked_path = installation;
         leaked_path["path"] = serde_json::json!("/private/model");
         assert!(validate_privacy_model_installation(&leaked_path).is_err());
+    }
+
+    #[test]
+    fn parses_privacy_model_default_ignore_without_requiring_manual_mapping() {
+        let probe = serde_json::json!({
+            "repo_id": "example/pii-tracer",
+            "requested_revision": "main",
+            "revision": "53d55aa8dbb28efaa4e9cf6b4b6015d00e43c088",
+            "name": "PII-Tracer",
+            "license": "mit",
+            "languages": ["en"],
+            "adapter": "pplx_bioes_viterbi",
+            "variants": [privacy_variant_value()],
+            "labels": [
+                {"label": "private_email", "suggested_kind": "email", "suggested_ignore": false},
+                {"label": "other_pii", "suggested_kind": null, "suggested_ignore": true}
+            ],
+            "requires_label_mapping": false
+        });
+        let parse = |value: &serde_json::Value| {
+            parse_privacy_model_probe(&serde_json::to_vec(value).unwrap())
+        };
+        assert_eq!(parse(&probe).unwrap(), probe);
+
+        for invalid_ignore in [
+            serde_json::json!("true"),
+            serde_json::Value::Null,
+            serde_json::json!(1),
+        ] {
+            let mut invalid = probe.clone();
+            invalid["labels"][1]["suggested_ignore"] = invalid_ignore;
+            assert!(parse(&invalid).is_err());
+        }
+        let mut conflicting = probe.clone();
+        conflicting["labels"][0]["suggested_ignore"] = serde_json::json!(true);
+        assert!(parse(&conflicting).is_err());
+
+        let mut unexpected = probe.clone();
+        unexpected["labels"][0]["unexpected"] = serde_json::json!(false);
+        assert!(parse(&unexpected).is_err());
+
+        let mut unmapped = probe.clone();
+        unmapped["labels"][1]["suggested_ignore"] = serde_json::json!(false);
+        assert!(parse(&unmapped).is_err());
+        unmapped["requires_label_mapping"] = serde_json::json!(true);
+        assert!(parse(&unmapped).is_ok());
+        unmapped["labels"][1]
+            .as_object_mut()
+            .unwrap()
+            .remove("suggested_ignore");
+        assert!(parse(&unmapped).is_ok());
+
+        let mut inconsistent = probe;
+        inconsistent["requires_label_mapping"] = serde_json::json!(true);
+        assert!(parse(&inconsistent).is_err());
     }
 
     #[test]

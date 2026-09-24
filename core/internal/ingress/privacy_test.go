@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -521,16 +522,23 @@ func TestPrivacyBlockRunsBeforeCredentialLoadingAndDoesNotLeakMatch(t *testing.T
 	}
 }
 
+// unsafeRewriteFilter stands in for any redaction the engine cannot rewrite
+// safely; which inputs reach that state is covered by the privacy package.
+type unsafeRewriteFilter struct{ privacy.Filter }
+
+func (unsafeRewriteFilter) Inspect(context.Context, privacy.Policy, contract.ProtocolID, []byte) (privacy.Result, error) {
+	return privacy.Result{}, privacy.ErrUnsafeRewrite
+}
+
 func TestPrivacyUnsafeRewriteStopsBeforeCredentialLoadingAndForwarding(t *testing.T) {
-	// A detector can mistakenly include JSON structure in a sensitive span.
 	// The original request is valid; only the redaction attempt fails.
 	const body = `{"model":"gpt-5","input":[{"type":"function_call","name":"lookup","arguments":"{\"email\":\"alice@example.com\"}"}]}`
-	filter := testPrivacyEngine(t, privacy.Policy{
+	filter := unsafeRewriteFilter{testPrivacyEngine(t, privacy.Policy{
 		Enabled: true, Mode: privacy.ModeLocalModel, Action: privacy.ActionRedact,
 		LocalModelID: "model_00000000000000000000000000000001",
 	}, privacy.DetectorFunc(func(context.Context, privacy.DetectInput) ([]privacy.Finding, error) {
-		return []privacy.Finding{{Segment: 0, Start: 0, End: 1, Kind: privacy.KindEmail, Confidence: 1}}, nil
-	}))
+		return nil, nil
+	}))}
 	authorized := false
 	forwarded := false
 	records := &memoryRequestRecordStore{}
@@ -803,17 +811,21 @@ func TestPrivacyInvalidInputIsReportedAsInspectionFailure(t *testing.T) {
 }
 
 func TestPrivacyDetectorAndPolicyFailuresUseSanitizedStatusMapping(t *testing.T) {
+	// Detector failures share one generic client reply; only the local record
+	// names which way the detector failed.
 	tests := []struct {
-		name        string
-		providerErr error
-		detectorErr error
-		status      int
-		code        string
+		name          string
+		providerErr   error
+		detectorErr   error
+		status        int
+		code          string
+		eventSummary  string
+		recordMessage string
 	}{
-		{name: "policy", providerErr: errors.New("private policy detail alice@example.com"), status: http.StatusServiceUnavailable, code: "privacy_policy_unavailable"},
-		{name: "unavailable", detectorErr: errors.New("private model detail alice@example.com"), status: http.StatusServiceUnavailable, code: "safety_engine_unavailable"},
-		{name: "limit", detectorErr: privacy.ErrDetectorLimit, status: http.StatusServiceUnavailable, code: "safety_engine_unavailable"},
-		{name: "timeout", detectorErr: privacy.ErrDetectorTimeout, status: http.StatusServiceUnavailable, code: "safety_engine_unavailable"},
+		{name: "policy", providerErr: errors.New("private policy detail alice@example.com"), status: http.StatusServiceUnavailable, code: "privacy_policy_unavailable", eventSummary: "privacy_policy_unavailable"},
+		{name: "unavailable", detectorErr: errors.New("private model detail alice@example.com"), status: http.StatusServiceUnavailable, code: "safety_engine_unavailable", eventSummary: "safety_engine_unavailable · detector_unavailable", recordMessage: "local privacy detector is unavailable"},
+		{name: "limit", detectorErr: privacy.ErrDetectorLimit, status: http.StatusServiceUnavailable, code: "safety_engine_unavailable", eventSummary: "safety_engine_unavailable · detector_limit", recordMessage: "local privacy detector input limit exceeded"},
+		{name: "timeout", detectorErr: privacy.ErrDetectorTimeout, status: http.StatusServiceUnavailable, code: "safety_engine_unavailable", eventSummary: "safety_engine_unavailable · detector_timeout", recordMessage: "local privacy detector timed out"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -848,13 +860,262 @@ func TestPrivacyDetectorAndPolicyFailuresUseSanitizedStatusMapping(t *testing.T)
 				httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"input":"alice@example.com"}`)),
 			)
 			envelope := assertInferenceError(t, response, test.status, test.code)
-			assertPrivacyErrorRecord(t, records, response.Code, contract.RequestStatusFailed, "privacy", test.code, envelope.Error)
+			recorded := envelope.Error
+			if test.recordMessage != "" {
+				if envelope.Error.Message != "local safety engine is unavailable" {
+					t.Fatalf("client detector message = %q", envelope.Error.Message)
+				}
+				recorded.Message = test.recordMessage
+			}
+			assertPrivacyErrorRecord(t, records, response.Code, contract.RequestStatusFailed, "privacy", test.eventSummary, recorded)
 			if strings.Contains(response.Body.String(), "alice@example.com") ||
 				strings.Contains(response.Body.String(), "private") {
 				t.Fatalf("private detector detail leaked: %s", response.Body.String())
 			}
 		})
 	}
+}
+
+func TestPrivacyInspectionIsPersistedWhileDetectorRuns(t *testing.T) {
+	records := &memoryRequestRecordStore{}
+	var live []contract.RequestEvent
+	filter := testPrivacyEngine(t, privacy.Policy{
+		Enabled: true, Mode: privacy.ModeLocalModel, Action: privacy.ActionBlock,
+		LocalModelID: "model_00000000000000000000000000000001",
+	}, privacy.DetectorFunc(func(context.Context, privacy.DetectInput) ([]privacy.Finding, error) {
+		// The detector runs on the request goroutine; the store holds what a
+		// desktop poll would read while it waits.
+		if len(records.records) != 1 {
+			t.Fatalf("live records = %#v", records.records)
+		}
+		live = append(live, records.records[0].Events...)
+		return nil, nil
+	}))
+	handler := NewWithDependencies(Dependencies{
+		Resolver: resolverFunc(func(context.Context, endpoint.ResolveRequest) (endpoint.Resolved, error) {
+			return endpoint.Resolved{Endpoint: validEndpoint(contract.ProtocolOpenAIResponses, false)}, nil
+		}),
+		PrivacyFilter:  filter,
+		RequestRecords: records,
+		Forwarder: forwarderFunc(func(writer http.ResponseWriter, _ *http.Request, _ transport.Target) error {
+			writer.WriteHeader(http.StatusOK)
+			return nil
+		}),
+	})
+	body := `{"model":"gpt-5","input":"hello"}`
+	handler.ServeHTTP(
+		httptest.NewRecorder(),
+		httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body)),
+	)
+
+	inspecting := "local_model · inspecting · " + strconv.Itoa(len(body)) + " B"
+	pending := privacyEvents(live)
+	if len(pending) != 1 || pending[0].Status != contract.RequestStatusPending ||
+		pending[0].EndedAt != nil || pending[0].Summary != inspecting {
+		t.Fatalf("live privacy events = %#v", pending)
+	}
+	if len(records.records) != 1 {
+		t.Fatalf("records = %#v", records.records)
+	}
+	final := privacyEvents(records.records[0].Events)
+	if len(final) != 1 || final[0].Status != contract.RequestStatusSucceeded ||
+		final[0].Summary != "allow" || final[0].EndedAt == nil ||
+		!final[0].StartedAt.Equal(pending[0].StartedAt) {
+		t.Fatalf("final privacy events = %#v", final)
+	}
+}
+
+func TestPrivacyInspectionCancelledByClientIsSettled(t *testing.T) {
+	records := &memoryRequestRecordStore{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	filter := testPrivacyEngine(t, privacy.Policy{
+		Enabled: true, Mode: privacy.ModeLocalModel, Action: privacy.ActionBlock,
+		LocalModelID: "model_00000000000000000000000000000001",
+	}, privacy.DetectorFunc(func(detectCtx context.Context, _ privacy.DetectInput) ([]privacy.Finding, error) {
+		cancel()
+		<-detectCtx.Done()
+		return nil, detectCtx.Err()
+	}))
+	forwarded := false
+	handler := NewWithDependencies(Dependencies{
+		Resolver: resolverFunc(func(context.Context, endpoint.ResolveRequest) (endpoint.Resolved, error) {
+			return endpoint.Resolved{Endpoint: validEndpoint(contract.ProtocolOpenAIResponses, false)}, nil
+		}),
+		PrivacyFilter:  filter,
+		RequestRecords: records,
+		Forwarder: forwarderFunc(func(http.ResponseWriter, *http.Request, transport.Target) error {
+			forwarded = true
+			return nil
+		}),
+	})
+	handler.ServeHTTP(
+		httptest.NewRecorder(),
+		httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"input":"hello"}`)).WithContext(ctx),
+	)
+
+	if forwarded || len(records.records) != 1 {
+		t.Fatalf("forwarded = %v, records = %#v", forwarded, records.records)
+	}
+	record := records.records[0]
+	events := privacyEvents(record.Events)
+	if record.Status != contract.RequestStatusCancelled || len(events) != 1 ||
+		events[0].Status != contract.RequestStatusCancelled || events[0].EndedAt == nil {
+		t.Fatalf("record = %#v, privacy events = %#v", record, events)
+	}
+}
+
+func TestPrivacyInspectionSummaryReportsBatchProgress(t *testing.T) {
+	records := &memoryRequestRecordStore{}
+	var live []string
+	filter := testPrivacyEngine(t, privacy.Policy{
+		Enabled: true, Mode: privacy.ModeLocalModel, Action: privacy.ActionBlock,
+		LocalModelID: "model_00000000000000000000000000000001",
+	}, privacy.DetectorFunc(func(ctx context.Context, _ privacy.DetectInput) ([]privacy.Finding, error) {
+		snapshot := func() {
+			if events := privacyEvents(records.records[0].Events); len(events) == 1 {
+				live = append(live, events[0].Summary)
+			}
+		}
+		progress := privacy.InspectionProgress{Bytes: 3072, CachedBytes: 1024, Batches: 2}
+		privacy.ReportInspectionProgress(ctx, progress)
+		snapshot()
+		progress.InspectedBytes, progress.CompletedBatches = 1024, 1
+		privacy.ReportInspectionProgress(ctx, progress)
+		snapshot()
+		// A request served from cache has no batches and keeps its summary.
+		privacy.ReportInspectionProgress(ctx, privacy.InspectionProgress{Bytes: 3072, CachedBytes: 3072})
+		snapshot()
+		return nil, nil
+	}))
+	handler := NewWithDependencies(Dependencies{
+		Resolver: resolverFunc(func(context.Context, endpoint.ResolveRequest) (endpoint.Resolved, error) {
+			return endpoint.Resolved{Endpoint: validEndpoint(contract.ProtocolOpenAIResponses, false)}, nil
+		}),
+		PrivacyFilter:  filter,
+		RequestRecords: records,
+		Forwarder: forwarderFunc(func(writer http.ResponseWriter, _ *http.Request, _ transport.Target) error {
+			writer.WriteHeader(http.StatusOK)
+			return nil
+		}),
+	})
+	body := `{"model":"gpt-5","input":"hello"}`
+	handler.ServeHTTP(
+		httptest.NewRecorder(),
+		httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body)),
+	)
+
+	inspecting := "local_model · inspecting · " + strconv.Itoa(len(body)) + " B"
+	want := []string{
+		inspecting + " · model 0 B of 2.0 KiB · cached 1.0 KiB · batch 0/2",
+		inspecting + " · model 1.0 KiB of 2.0 KiB · cached 1.0 KiB · batch 1/2",
+		inspecting + " · model 1.0 KiB of 2.0 KiB · cached 1.0 KiB · batch 1/2",
+	}
+	if !slices.Equal(live, want) {
+		t.Fatalf("live summaries = %q, want %q", live, want)
+	}
+	final := privacyEvents(records.records[0].Events)
+	if len(final) != 1 || final[0].Summary != "allow" || final[0].Status != contract.RequestStatusSucceeded {
+		t.Fatalf("final privacy events = %#v", final)
+	}
+}
+
+func TestPrivacyDetectorTimeoutKeepsLastProgressInRecord(t *testing.T) {
+	records := &memoryRequestRecordStore{}
+	filter := testPrivacyEngine(t, privacy.Policy{
+		Enabled: true, Mode: privacy.ModeLocalModel, Action: privacy.ActionBlock,
+		LocalModelID: "model_00000000000000000000000000000001",
+	}, privacy.DetectorFunc(func(ctx context.Context, _ privacy.DetectInput) ([]privacy.Finding, error) {
+		privacy.ReportInspectionProgress(ctx, privacy.InspectionProgress{
+			Bytes: 90 << 10, InspectedBytes: 40 << 10, Batches: 11, CompletedBatches: 5,
+		})
+		return nil, privacy.ErrDetectorTimeout
+	}))
+	handler := NewWithDependencies(Dependencies{
+		Resolver: resolverFunc(func(context.Context, endpoint.ResolveRequest) (endpoint.Resolved, error) {
+			return endpoint.Resolved{Endpoint: validEndpoint(contract.ProtocolOpenAIResponses, false)}, nil
+		}),
+		PrivacyFilter:  filter,
+		RequestRecords: records,
+	})
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(
+		response,
+		httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"input":"hello"}`)),
+	)
+
+	envelope := assertInferenceError(t, response, http.StatusServiceUnavailable, "safety_engine_unavailable")
+	if envelope.Error.Message != "local safety engine is unavailable" || strings.Contains(response.Body.String(), "batch") {
+		t.Fatalf("client reply = %s", response.Body.String())
+	}
+	recorded := envelope.Error
+	recorded.Message = "local privacy detector timed out"
+	assertPrivacyErrorRecord(t, records, response.Code, contract.RequestStatusFailed, "privacy",
+		"safety_engine_unavailable · detector_timeout · batch 5/11", recorded)
+}
+
+func TestPrivacyToolDeclarationSwitches(t *testing.T) {
+	stored := contract.DefaultPrivacyPolicy()
+	stored.Enabled = true
+	stored.Detector = contract.PolicyDetectorLocalModel
+	modelID := contract.PrivacyModelID("model_00000000000000000000000000000001")
+	stored.LocalModelID = &modelID
+	var inspected []string
+	filter, err := privacy.New(privacy.PolicyProviderFunc(func(context.Context, privacy.Scope) (privacy.Policy, error) {
+		return privacy.FromContractPolicy(stored)
+	}), privacy.DetectorFunc(func(_ context.Context, input privacy.DetectInput) ([]privacy.Finding, error) {
+		for _, segment := range input.Segments {
+			inspected = append(inspected, segment.Value)
+		}
+		return nil, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewWithDependencies(Dependencies{
+		Resolver: resolverFunc(func(context.Context, endpoint.ResolveRequest) (endpoint.Resolved, error) {
+			return endpoint.Resolved{Endpoint: validEndpoint(contract.ProtocolOpenAIResponses, false)}, nil
+		}),
+		PrivacyFilter: filter,
+		Forwarder: forwarderFunc(func(writer http.ResponseWriter, _ *http.Request, _ transport.Target) error {
+			writer.WriteHeader(http.StatusOK)
+			return nil
+		}),
+	})
+	body := `{"model":"gpt-5","input":[` +
+		`{"type":"additional_tools","role":"developer","tools":[{"type":"function","name":"f","description":"extra docs"}]},` +
+		`{"role":"user","content":"hello"}],` +
+		`"tools":[{"type":"function","name":"g","description":"top docs"}]}`
+	for _, test := range []struct {
+		name                  string
+		skipTools, inspectAdd bool
+		want                  []string
+	}{
+		{"defaults", false, false, []string{"hello", "top docs"}},
+		{"skip top-level tools", true, false, []string{"hello"}},
+		{"inspect additional_tools", false, true, []string{"extra docs", "hello", "top docs"}},
+	} {
+		stored.SkipToolDeclarations, stored.InspectAdditionalTools = test.skipTools, test.inspectAdd
+		inspected = nil
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body)))
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s: status=%d body=%s", test.name, response.Code, response.Body.String())
+		}
+		if !slices.Equal(inspected, test.want) {
+			t.Fatalf("%s: inspected=%q, want %q", test.name, inspected, test.want)
+		}
+	}
+}
+
+func privacyEvents(events []contract.RequestEvent) []contract.RequestEvent {
+	var matched []contract.RequestEvent
+	for _, event := range events {
+		if event.Kind == contract.RequestEventPrivacy {
+			matched = append(matched, event)
+		}
+	}
+	return matched
 }
 
 func TestPrivacyReusesFourBufferedBodyPermitsForGemini(t *testing.T) {

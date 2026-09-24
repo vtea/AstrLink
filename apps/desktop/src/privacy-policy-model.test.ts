@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   defaultPrivacyKindRules,
   isResourceHeavyVariant,
+  localModelActive,
   parsePrivacyDryRunResult,
   parsePrivacyModelCatalog,
   parsePrivacyModelInstallation,
@@ -10,6 +11,7 @@ import {
   parsePrivacyModelProbe,
   parsePrivacyPolicyPage,
   parsePrivacyPolicyRecord,
+  patchUnloadsLocalModel,
   validateLocalProbeInput,
   validatePrivacyDryRunInput,
   validatePrivacyModelInstallInput,
@@ -34,6 +36,8 @@ const policy = {
   allowlist_rules: [{ type: "domain_suffix", value: "github.com" }],
   restore_tool_arguments: true,
   placeholder_notice: true,
+  skip_tool_declarations: false,
+  inspect_additional_tools: false,
   match: {},
 } as const;
 const variant = {
@@ -317,6 +321,64 @@ describe("privacy-policy IPC contract", () => {
     ).toThrow("token placeholder style");
   });
 
+  it("defaults the tool declaration switches and validates them", () => {
+    const {
+      skip_tool_declarations: _skip,
+      inspect_additional_tools: _inspect,
+      ...legacy
+    } = policy;
+    expect(
+      parsePrivacyPolicyPage({ items: [legacy], next_cursor: null }).items[0],
+    ).toMatchObject({
+      skip_tool_declarations: false,
+      inspect_additional_tools: false,
+    });
+    expect(
+      parsePrivacyPolicyPage({
+        items: [
+          {
+            ...policy,
+            skip_tool_declarations: true,
+            inspect_additional_tools: true,
+          },
+        ],
+        next_cursor: null,
+      }).items[0],
+    ).toMatchObject({
+      skip_tool_declarations: true,
+      inspect_additional_tools: true,
+    });
+    for (const key of ["skip_tool_declarations", "inspect_additional_tools"]) {
+      expect(() =>
+        parsePrivacyPolicyPage({
+          items: [{ ...policy, [key]: "yes" }],
+          next_cursor: null,
+        }),
+      ).toThrow(key);
+    }
+
+    const patch = {
+      skip_tool_declarations: true,
+      inspect_additional_tools: true,
+    };
+    expect(
+      validatePrivacyDryRunInput({
+        protocol: "openai.chat",
+        sample_text: "hello",
+        policy: patch,
+      }).policy,
+    ).toEqual(patch);
+    expect(() =>
+      validatePrivacyDryRunInput({
+        protocol: "openai.chat",
+        sample_text: "hello",
+        policy: {
+          inspect_additional_tools: null as unknown as boolean,
+        },
+      }),
+    ).toThrow("inspect_additional_tools");
+  });
+
   it("rejects policy drift and unknown detectors", () => {
     expect(() =>
       parsePrivacyPolicyPage({
@@ -345,6 +407,10 @@ describe("privacy-policy IPC contract", () => {
   });
 
   it("strictly parses catalog variants and custom probe label suggestions", () => {
+    const pplx = { ...catalogModel, adapter: "pplx_bioes_viterbi" };
+    expect(parsePrivacyModelCatalog({ items: [pplx] }).items[0].adapter).toBe(
+      "pplx_bioes_viterbi",
+    );
     expect(parsePrivacyModelCatalog({ items: [catalogModel] })).toEqual({
       items: [catalogModel],
     });
@@ -364,6 +430,32 @@ describe("privacy-policy IPC contract", () => {
       requires_label_mapping: true,
     } as const;
     expect(parsePrivacyModelProbe(probe)).toEqual(probe);
+    const defaultIgnoredProbe = {
+      ...probe,
+      labels: [
+        probe.labels[0],
+        { label: "other_pii", suggested_kind: null, suggested_ignore: true },
+      ],
+      requires_label_mapping: false,
+    };
+    expect(parsePrivacyModelProbe(defaultIgnoredProbe)).toEqual(
+      defaultIgnoredProbe,
+    );
+    expect(() =>
+      parsePrivacyModelProbe({
+        ...defaultIgnoredProbe,
+        labels: [{ ...probe.labels[0], suggested_ignore: true }],
+      }),
+    ).toThrow("cannot map and ignore");
+    expect(() =>
+      parsePrivacyModelProbe({
+        ...defaultIgnoredProbe,
+        labels: [
+          ...defaultIgnoredProbe.labels,
+          { label: "UNKNOWN", suggested_kind: null },
+        ],
+      }),
+    ).toThrow("inconsistent with label suggestions");
     expect(parsePrivacyModelProbe({ ...probe, license: null })).toEqual({
       ...probe,
       license: null,
@@ -630,5 +722,44 @@ describe("privacy-policy IPC contract", () => {
     expect(() =>
       validateLocalProbeInput({ path: `/${"a".repeat(4096)}` }),
     ).toThrow("1 to 4096 characters");
+  });
+
+  it("predicts when a policy patch makes Core stop the local model", () => {
+    const active = parsePrivacyPolicyRecord({
+      policy: {
+        ...policy,
+        enabled: true,
+        detector: "local_model",
+        local_model_id: installationID,
+      },
+      etag: `"sha256:${"a".repeat(64)}"`,
+    }).policy;
+    expect(localModelActive(active)).toBe(true);
+    expect(patchUnloadsLocalModel(active, { enabled: false })).toBe(true);
+    expect(
+      patchUnloadsLocalModel(active, {
+        detector: "regex",
+        local_model_id: null,
+      }),
+    ).toBe(true);
+    expect(patchUnloadsLocalModel(active, { request_action: "allow" })).toBe(
+      true,
+    );
+    expect(
+      patchUnloadsLocalModel(active, {
+        local_model_id: "model_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      }),
+    ).toBe(true);
+    expect(patchUnloadsLocalModel(active, { request_action: "block" })).toBe(
+      false,
+    );
+    expect(patchUnloadsLocalModel(active, { min_confidence: 0.8 })).toBe(false);
+
+    const regex = parsePrivacyPolicyRecord({
+      policy: { ...policy, enabled: true },
+      etag: `"sha256:${"a".repeat(64)}"`,
+    }).policy;
+    expect(localModelActive(regex)).toBe(false);
+    expect(patchUnloadsLocalModel(regex, { enabled: false })).toBe(false);
   });
 });

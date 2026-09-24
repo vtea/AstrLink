@@ -71,6 +71,7 @@ struct PreferencesInput {
     max_request_body_mib: u32,
     locale: Locale,
     theme: ThemePreference,
+    quota_display_mode: preferences::QuotaDisplayMode,
     #[serde(default)]
     tray: TrayPreferences,
 }
@@ -89,6 +90,7 @@ impl From<PreferencesInput> for Preferences {
             max_request_body_mib: input.max_request_body_mib,
             locale: input.locale,
             theme: input.theme,
+            quota_display_mode: input.quota_display_mode,
             tray: input.tray,
         }
     }
@@ -396,9 +398,11 @@ fn update_preferences(
         return Err(persist_error);
     }
     manager.configure(&values);
-    // Locale, pages and menubar text re-render from stored state; a new usage
-    // line needs numbers the last digest did not collect.
-    if values.tray.usage != previous_tray.usage {
+    // Locale and pages re-render from stored state; a new usage line or
+    // menubar figure needs numbers the last digest may not have collected.
+    if values.tray.usage != previous_tray.usage
+        || values.tray.menubar_text != previous_tray.menubar_text
+    {
         // Operator-initiated: fresh local numbers, and plan windows unless
         // they were fetched a moment ago.
         tray::request_usage_refresh(
@@ -409,6 +413,9 @@ fn update_preferences(
     }
     tray_status::nudge(&app, tray_status::TrayMsg::Refresh);
     tray::refresh(&app);
+    if let Err(error) = app.emit("quota-display-mode-changed", values.quota_display_mode) {
+        eprintln!("unable to broadcast quota display mode: {error}");
+    }
     apply_native_theme(&app, values.theme);
     if let Err(error) = app.emit("theme-preference-changed", values.theme) {
         app_log::error!(
@@ -1125,6 +1132,14 @@ async fn probe_draft_service_models(
 }
 
 #[tauri::command]
+async fn probe_service_proxy(
+    manager: State<'_, Arc<CoreManager>>,
+    input: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    manager.probe_service_proxy(input).await
+}
+
+#[tauri::command]
 async fn begin_service_authorization(
     app: tauri::AppHandle,
     service_id: String,
@@ -1640,6 +1655,7 @@ pub fn run() {
             test_service,
             probe_service_models,
             probe_draft_service_models,
+            probe_service_proxy,
             begin_service_authorization,
             complete_service_authorization,
             open_authorization_url,

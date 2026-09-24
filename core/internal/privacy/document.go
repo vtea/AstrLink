@@ -36,7 +36,11 @@ const (
 	jsonToolPayloadContext
 )
 
-func extractDocument(protocol contract.ProtocolID, body []byte) (jsonDocument, []extractedSegment, error) {
+func extractDocument(
+	protocol contract.ProtocolID,
+	body []byte,
+	options InspectionOptions,
+) (jsonDocument, []extractedSegment, error) {
 	roots, supported := protocolRoots(protocol)
 	if !supported || len(bytes.TrimSpace(body)) == 0 {
 		return jsonDocument{}, nil, nil
@@ -62,6 +66,12 @@ func extractDocument(protocol contract.ProtocolID, body []byte) (jsonDocument, [
 
 	document := jsonDocument{body: body, duplicateKeys: duplicateKeys}
 	protected := continuationPaths(protocol, root)
+	if options.InspectToolDeclarations {
+		roots = append(roots, toolDeclarationRoots(protocol)...)
+	}
+	if options.SkipAdditionalTools {
+		addAdditionalToolsPaths(protocol, root, protected)
+	}
 	toolPayloads := structuredToolPayloadPaths(protocol, root)
 	extracted := make([]extractedSegment, 0)
 	overflow := false
@@ -81,13 +91,13 @@ func extractDocument(protocol contract.ProtocolID, body []byte) (jsonDocument, [
 
 // protocolRoots lists the request fields whose strings are inspected.
 //
-// Tool declarations are deliberately excluded. A tools array carries schemas and
-// author-written descriptions belonging to the agent harness, not text the
-// operator typed, yet it is dense with documentation links and sample addresses
-// that the detectors match. Redacting it inflated placeholder counts by an order
-// of magnitude while protecting nothing. Real user data travelling through tools
-// lives in call arguments and results, which remain covered under the input and
-// messages roots.
+// Tool declarations are excluded unless the policy opts in. A tools array
+// carries schemas and author-written descriptions belonging to the agent
+// harness, not text the operator typed, yet it is dense with documentation links
+// and sample addresses that the detectors match. Redacting it inflated
+// placeholder counts by an order of magnitude while protecting nothing. Real
+// user data travelling through tools lives in call arguments and results, which
+// remain covered under the input and messages roots.
 func protocolRoots(protocol contract.ProtocolID) ([]string, bool) {
 	switch protocol {
 	case contract.ProtocolOpenAIResponses, contract.ProtocolOpenAIResponsesCompact:
@@ -472,6 +482,9 @@ type placedFinding struct {
 	Finding
 	Value       string
 	Placeholder string
+	// quoted marks a JSON number inside a structured tool payload; the
+	// placeholder is written as a string so the payload stays valid JSON.
+	quoted bool
 }
 
 type rewriteOutcome struct {
@@ -557,6 +570,13 @@ func assignPlaceholders(
 			return nil, nil, ErrUnsafeRewrite
 		}
 		value := extracted[segmentIndex].Value
+		// Findings in a structured payload were aligned by the engine; the
+		// scan only tells a number, which needs quotes, from string contents.
+		structured := extracted[segmentIndex].validateStructuredJSON
+		var literals structuredJSONLiterals
+		if structured {
+			literals = scanStructuredJSONLiterals(value)
+		}
 		chosen, err := selectNonOverlappingFindings(value, segmentFindings)
 		if err != nil {
 			return nil, nil, err
@@ -565,6 +585,7 @@ func assignPlaceholders(
 			selected = append(selected, placedFinding{
 				Finding: finding,
 				Value:   value[finding.Start:finding.End],
+				quoted:  structured && literals.isNumber(finding.Start, finding.End),
 			})
 		}
 	}
@@ -672,7 +693,11 @@ func redactStringWithPlaceholders(value string, findings []placedFinding) (strin
 			finding.Start < 0 || finding.End > len(value) || finding.End <= finding.Start {
 			return "", ErrUnsafeRewrite
 		}
-		value = value[:finding.Start] + finding.Placeholder + value[finding.End:]
+		replacement := finding.Placeholder
+		if finding.quoted {
+			replacement = `"` + replacement + `"`
+		}
+		value = value[:finding.Start] + replacement + value[finding.End:]
 	}
 	return value, nil
 }

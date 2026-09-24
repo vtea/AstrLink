@@ -6,6 +6,7 @@ export type PrivacyAction = "allow" | "warn" | "block" | "redact";
 export type PrivacyModelAdapter =
   | "openai_bioes_viterbi"
   | "hf_token_classification"
+  | "pplx_bioes_viterbi"
   | "astrlink_sensitive_guard";
 export type CanonicalPrivacyKind =
   | "email"
@@ -131,6 +132,14 @@ export interface PrivacyPolicy {
   response_restore: boolean;
   restore_tool_arguments: boolean;
   placeholder_notice: boolean;
+  /** True keeps top-level tool declarations out of inspection; off by default. */
+  skip_tool_declarations: boolean;
+  /**
+   * True inspects Codex additional_tools input items; off by default.
+   * Independent of skip_tool_declarations: those items sit in the conversation
+   * input.
+   */
+  inspect_additional_tools: boolean;
   match: PrivacyPolicyMatch;
 }
 
@@ -159,6 +168,8 @@ export type PrivacyPolicyPatch = Partial<
     | "response_restore"
     | "restore_tool_arguments"
     | "placeholder_notice"
+    | "skip_tool_declarations"
+    | "inspect_additional_tools"
   >
 >;
 
@@ -244,6 +255,7 @@ export interface PrivacyModelCatalog {
 export interface PrivacyModelProbeLabel {
   label: string;
   suggested_kind: CanonicalPrivacyKind | null;
+  suggested_ignore?: boolean;
 }
 
 export interface PrivacyModelProbe {
@@ -333,6 +345,7 @@ const actions = new Set<PrivacyAction>(["allow", "warn", "block", "redact"]);
 const adapters = new Set<PrivacyModelAdapter>([
   "openai_bioes_viterbi",
   "hf_token_classification",
+  "pplx_bioes_viterbi",
   "astrlink_sensitive_guard",
 ]);
 const canonicalKinds = new Set<CanonicalPrivacyKind>([
@@ -685,6 +698,8 @@ export function parsePrivacyPolicy(value: unknown, path = "$"): PrivacyPolicy {
       "allowlist_rules",
       "restore_tool_arguments",
       "placeholder_notice",
+      "skip_tool_declarations",
+      "inspect_additional_tools",
     ],
     path,
   );
@@ -798,6 +813,18 @@ export function parsePrivacyPolicy(value: unknown, path = "$"): PrivacyPolicy {
     placeholder_notice: Object.hasOwn(policy, "placeholder_notice")
       ? booleanAt(policy.placeholder_notice, `${path}.placeholder_notice`)
       : true,
+    skip_tool_declarations: Object.hasOwn(policy, "skip_tool_declarations")
+      ? booleanAt(
+          policy.skip_tool_declarations,
+          `${path}.skip_tool_declarations`,
+        )
+      : false,
+    inspect_additional_tools: Object.hasOwn(policy, "inspect_additional_tools")
+      ? booleanAt(
+          policy.inspect_additional_tools,
+          `${path}.inspect_additional_tools`,
+        )
+      : false,
     match: parseMatch(policy.match, `${path}.match`),
   };
 }
@@ -813,6 +840,31 @@ export function defaultPrivacyKindRules(): PrivacyKindRule[] {
     enabled: kind !== "url" && kind !== "ip_address",
     style: PLACEHOLDER_STYLE_LOCKED_KINDS.has(kind) ? "token" : "natural",
   }));
+}
+
+/**
+ * Mirrors privacyworker.Client.ApplyPolicy: Core keeps the local model worker
+ * only while the policy can route requests through it.
+ */
+export function localModelActive(policy: PrivacyPolicy): boolean {
+  return (
+    policy.enabled &&
+    policy.detector === "local_model" &&
+    policy.local_model_id !== null &&
+    policy.request_action !== "allow"
+  );
+}
+
+/** Reports whether Core will stop the running local model for this patch. */
+export function patchUnloadsLocalModel(
+  policy: PrivacyPolicy,
+  patch: PrivacyPolicyPatch,
+): boolean {
+  if (!localModelActive(policy)) return false;
+  const next = { ...policy, ...patch };
+  return (
+    !localModelActive(next) || next.local_model_id !== policy.local_model_id
+  );
 }
 
 export function parsePrivacyRegexBuiltinRules(
@@ -1163,6 +1215,8 @@ function validatePrivacyPolicyPatch(
       "response_restore",
       "restore_tool_arguments",
       "placeholder_notice",
+      "skip_tool_declarations",
+      "inspect_additional_tools",
     ],
     "$.policy",
   );
@@ -1248,6 +1302,18 @@ function validatePrivacyPolicyPatch(
       "$.policy.placeholder_notice",
     );
   }
+  if (Object.hasOwn(object, "skip_tool_declarations")) {
+    validated.skip_tool_declarations = booleanAt(
+      object.skip_tool_declarations,
+      "$.policy.skip_tool_declarations",
+    );
+  }
+  if (Object.hasOwn(object, "inspect_additional_tools")) {
+    validated.inspect_additional_tools = booleanAt(
+      object.inspect_additional_tools,
+      "$.policy.inspect_additional_tools",
+    );
+  }
   return validated;
 }
 
@@ -1328,7 +1394,14 @@ export function parsePrivacyModelProbe(value: unknown): PrivacyModelProbe {
   const labels = probe.labels.map((item, index) => {
     const path = `$.labels[${index}]`;
     const label = objectAt(item, path);
-    keysAt(label, ["label", "suggested_kind"], [], path);
+    keysAt(label, ["label", "suggested_kind"], ["suggested_ignore"], path);
+    const suggestedIgnore =
+      label.suggested_ignore === undefined
+        ? false
+        : booleanAt(label.suggested_ignore, `${path}.suggested_ignore`);
+    if (suggestedIgnore && label.suggested_kind !== null) {
+      invalid(path, "label suggestion cannot map and ignore");
+    }
     return {
       label: (() => {
         const sourceLabel = stringAt(label.label, `${path}.label`, 1, 128);
@@ -1341,6 +1414,9 @@ export function parsePrivacyModelProbe(value: unknown): PrivacyModelProbe {
         label.suggested_kind === null
           ? null
           : canonicalKindAt(label.suggested_kind, `${path}.suggested_kind`),
+      ...(label.suggested_ignore === undefined
+        ? {}
+        : { suggested_ignore: suggestedIgnore }),
     };
   });
   if (new Set(labels.map((item) => item.label)).size !== labels.length) {
@@ -1352,7 +1428,9 @@ export function parsePrivacyModelProbe(value: unknown): PrivacyModelProbe {
   );
   if (
     requiresLabelMapping !==
-    labels.some((label) => label.suggested_kind === null)
+    labels.some(
+      (label) => label.suggested_kind === null && !label.suggested_ignore,
+    )
   ) {
     invalid("$.requires_label_mapping", "inconsistent with label suggestions");
   }

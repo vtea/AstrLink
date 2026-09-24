@@ -1,3 +1,4 @@
+import { useWorkspaceSnapshot } from "./workspace-snapshots";
 import { SessionChannelBindings } from "./SessionChannelBindings";
 import { RecoveryChain, RecoveryDetails } from "./components/RecoveryDetails";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
@@ -18,6 +19,7 @@ import { ActionGroup } from "@/components/ActionGroup";
 import { ScrollWorkspace } from "@/components/ScrollWorkspace";
 import { FilterSelect } from "@/components/FilterSelect";
 import { FormMessage } from "@/components/FormMessage";
+import { MultiFilterSelect } from "@/components/MultiFilterSelect";
 import { HelpPopover } from "@/components/HelpPopover";
 import { Metric as SummaryMetric, MetricGroup } from "@/components/Metric";
 import { IconButton } from "@/components/IconButton";
@@ -58,6 +60,7 @@ import {
 } from "./audit-bundle";
 import { buildSkillDiagnostic } from "./skill-diagnostic";
 import type { AuditSettings, AuditSettingsPatch } from "./audit-settings-model";
+import { useExportEnvironment } from "./export-environment";
 import {
   deleteRequestRecord,
   getAuditSettings,
@@ -74,6 +77,7 @@ import { i18n, useT } from "./i18n";
 import { useLiveClock } from "./live-clock";
 import { notify } from "./notify";
 import { PageHeader } from "./PageHeader";
+import type { AccessTokenSummary } from "./access-token-model";
 import type { RoutableService } from "./service-model";
 import {
   requestServiceIdentity,
@@ -124,6 +128,7 @@ const EMPTY_FILTERS: RecordFilters = {
   status: "",
   serviceId: "",
   protocol: "",
+  localAccessTokenIds: [],
 };
 
 type RecordsView = "monitor" | "detail";
@@ -203,11 +208,17 @@ function sessionDetailKey(detail: RequestSessionDetail): string {
 }
 
 export function RequestRecords({
+  accessTokens,
+  accessTokensReady,
   coreSessionKey,
+  initialLocalAccessTokenId,
   isReady,
   services,
 }: {
+  accessTokens: AccessTokenSummary[];
+  accessTokensReady: boolean;
   coreSessionKey: string | null;
+  initialLocalAccessTokenId?: string;
   isReady: boolean;
   services: (RoutableService & RequestService)[];
 }) {
@@ -216,17 +227,38 @@ export function RequestRecords({
     () => Object.fromEntries(services.map((service) => [service.id, service])),
     [services],
   );
+  const accessTokenOptions = useMemo(
+    () => accessTokens.map((token) => ({ value: token.id, label: token.name })),
+    [accessTokens],
+  );
   const [view, setView] = useState<RecordsView>("monitor");
   const [kind, setKind] = useState<RecordsKind>("inference");
-  const [live, setLive] = useState<LiveState>({
-    items: [],
-    queued: [],
-    nextCursor: null,
-  });
-  const [filters, setFilters] = useState<RecordFilters>(EMPTY_FILTERS);
-  const [listStatus, setListStatus] = useState<
+  const [filters, setFilters] = useState<RecordFilters>(() => ({
+    ...EMPTY_FILTERS,
+    localAccessTokenIds: initialLocalAccessTokenId
+      ? [initialLocalAccessTokenId]
+      : [],
+  }));
+  const tokenFilter = () =>
+    filters.localAccessTokenIds.length
+      ? filters.localAccessTokenIds
+      : undefined;
+  const localAccessTokenFilterKey = filters.localAccessTokenIds.join("\u0000");
+  // Core applies the token filter, so each selection retains its own list.
+  const [live, setLive] = useWorkspaceSnapshot<LiveState>(
+    `request-list:${coreSessionKey}:${kind}:${localAccessTokenFilterKey}`,
+    {
+      items: [],
+      queued: [],
+      nextCursor: null,
+    },
+  );
+  const [listStatus, setListStatus] = useWorkspaceSnapshot<
     "blocked" | "loading" | "ready" | "error"
-  >("blocked");
+  >(
+    `request-list-status:${coreSessionKey}:${kind}:${localAccessTokenFilterKey}`,
+    "blocked",
+  );
   const [listError, setListError] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [syncWarning, setSyncWarning] = useState<string | null>(null);
@@ -399,7 +431,23 @@ export function RequestRecords({
     setAuditContent(null);
     setAuditLoading(false);
     setAuditError(null);
-    setFilters(EMPTY_FILTERS);
+    const initialTokenIds = initialLocalAccessTokenId
+      ? [initialLocalAccessTokenId]
+      : [];
+    setFilters((current) => {
+      const sameTokenSelection =
+        current.localAccessTokenIds.length === initialTokenIds.length &&
+        current.localAccessTokenIds.every((id, index) => id === initialTokenIds[index]);
+      if (
+        sameTokenSelection &&
+        current.status === EMPTY_FILTERS.status &&
+        current.serviceId === EMPTY_FILTERS.serviceId &&
+        current.protocol === EMPTY_FILTERS.protocol
+      ) {
+        return current;
+      }
+      return { ...EMPTY_FILTERS, localAccessTokenIds: initialTokenIds };
+    });
     setSettingsOpen(false);
     setSettings(null);
     setSettingsDraft(null);
@@ -421,7 +469,17 @@ export function RequestRecords({
         if (generationRef.current !== generation) return;
         setError(messageOf(requestError, i18n.t("records.auditReadFailed")));
       });
-  }, [coreSessionKey, isReady]);
+  }, [coreSessionKey, initialLocalAccessTokenId, isReady]);
+
+  useEffect(() => {
+    if (!accessTokensReady) return;
+    const valid = new Set(accessTokens.map((token) => token.id));
+    setFilters((current) => {
+      const next = current.localAccessTokenIds.filter((id) => valid.has(id));
+      if (next.length === current.localAccessTokenIds.length) return current;
+      return { ...current, localAccessTokenIds: next };
+    });
+  }, [accessTokens, accessTokensReady]);
 
   useEffect(() => {
     const generation = ++listGenerationRef.current;
@@ -429,16 +487,19 @@ export function RequestRecords({
     pollFailureRef.current = 0;
     atTopRef.current = true;
     if (monitorScrollRef.current) monitorScrollRef.current.scrollTop = 0;
-    setLive({ items: [], queued: [], nextCursor: null });
+    if (!isReady) setLive({ items: [], queued: [], nextCursor: null });
     setLoadingMore(false);
     setListError(null);
     setSyncWarning(null);
-    setListStatus(isReady ? "loading" : "blocked");
+    setListStatus((current) =>
+      isReady ? (current === "ready" ? "ready" : "loading") : "blocked",
+    );
     if (!isReady) return;
     pollInFlightRef.current = true;
     void listRequestSessions({
       limit: PAGE_LIMIT,
       kind: kind === "all" ? undefined : kind,
+      local_access_token_ids: tokenFilter(),
     })
       .then((page) => {
         if (listGenerationRef.current !== generation) return;
@@ -462,7 +523,7 @@ export function RequestRecords({
     return () => {
       listGenerationRef.current += 1;
     };
-  }, [coreSessionKey, isReady, kind]);
+  }, [coreSessionKey, isReady, kind, localAccessTokenFilterKey]);
 
   useEffect(() => {
     if (!isReady) return;
@@ -479,6 +540,7 @@ export function RequestRecords({
         const page = await listRequestSessions({
           limit: PAGE_LIMIT,
           kind: kind === "all" ? undefined : kind,
+          local_access_token_ids: tokenFilter(),
         });
         if (listGenerationRef.current !== generation) return;
         setLive((current) => {
@@ -547,7 +609,7 @@ export function RequestRecords({
       document.removeEventListener("visibilitychange", onVisibilityChange);
       manualPollRef.current = null;
     };
-  }, [coreSessionKey, isReady, kind]);
+  }, [coreSessionKey, isReady, kind, localAccessTokenFilterKey]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -706,6 +768,7 @@ export function RequestRecords({
       const page = await listRequestSessions({
         limit: PAGE_LIMIT,
         kind: kind === "all" ? undefined : kind,
+        local_access_token_ids: tokenFilter(),
         cursor,
       });
       if (listGenerationRef.current !== generation) return;
@@ -748,6 +811,7 @@ export function RequestRecords({
       const page = await listRequestSessions({
         limit: PAGE_LIMIT,
         kind: kind === "all" ? undefined : kind,
+        local_access_token_ids: tokenFilter(),
       });
       if (listGenerationRef.current !== generation) return;
       setLive({
@@ -790,6 +854,7 @@ export function RequestRecords({
       const page = await listRequestSessions({
         limit: PAGE_LIMIT,
         kind: kind === "all" ? undefined : kind,
+        local_access_token_ids: tokenFilter(),
       });
       if (listGenerationRef.current !== generation) return;
       setLive({
@@ -1027,7 +1092,7 @@ export function RequestRecords({
                     />
                     {t("records.syncEverySecond")}
                   </span>
-                  <div className="grid min-w-0 flex-1 basis-72 grid-cols-[minmax(0,0.8fr)_minmax(0,1fr)_minmax(0,1.2fr)] gap-2 @[760px]:max-w-xl">
+                  <div className="grid min-w-0 flex-1 basis-72 grid-cols-2 gap-2 @[760px]:max-w-2xl @[760px]:grid-cols-4">
                     <FilterSelect
                       ariaLabel={t("records.filter", {
                         label: t("records.status"),
@@ -1084,6 +1149,23 @@ export function RequestRecords({
                         })),
                       ]}
                       value={filters.protocol}
+                    />
+                    <MultiFilterSelect
+                      allLabel={t("common.all")}
+                      ariaLabel={t("records.filter", { label: t("records.accessToken") })}
+                      className="w-full"
+                      clearLabel={t("records.clearTokenFilter")}
+                      disabled={!isReady || !accessTokensReady}
+                      emptyMessage={t("records.noAccessTokenResults")}
+                      label={t("records.accessToken")}
+                      onChange={(localAccessTokenIds) =>
+                        setFilters((current) => ({ ...current, localAccessTokenIds }))
+                      }
+                      options={accessTokenOptions}
+                      searchPlaceholder={t("records.searchAccessTokens")}
+                      selectAllLabel={t("records.selectAllTokens")}
+                      selectedCountLabel={(count) => t("records.selectedTokens", { count })}
+                      value={filters.localAccessTokenIds}
                     />
                   </div>
                   <Button
@@ -1150,13 +1232,12 @@ export function RequestRecords({
                         : "records.empty",
                   )}
                   action={
-                    filters.status || filters.serviceId || filters.protocol ? (
+                    filters.status || filters.serviceId || filters.protocol || filters.localAccessTokenIds.length ? (
                       <Button
                         variant="outline"
                         size="sm"
                         onClick={() => setFilters(EMPTY_FILTERS)}
-                      >
-                        {t("records.clearFilters")}
+                      >                        {t("records.clearFilters")}
                       </Button>
                     ) : undefined
                   }
@@ -1190,6 +1271,7 @@ export function RequestRecords({
             auditContent={auditContent}
             auditError={auditError}
             auditLoading={auditLoading}
+            auditSettings={settings}
             deleting={deleting}
             onBack={returnToMonitor}
             onClearDecrypted={clearDecrypted}
@@ -1535,7 +1617,7 @@ function SessionRow({
           model={session.requested_model}
           reasoningEffort={session.reasoning_effort}
         />
-        <span className="col-span-2 col-start-2 row-start-3 grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 text-xs leading-5 text-muted-foreground @[680px]:row-start-2 @[680px]:grid-cols-[7rem_minmax(0,1fr)_12rem_4.5rem]">
+        <span className="col-span-2 col-start-2 row-start-3 grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 text-xs leading-5 text-muted-foreground @[680px]:row-start-2 @[680px]:grid-cols-[7rem_minmax(0,1fr)_minmax(max-content,1fr)_4.5rem]">
           <code
             className="col-start-1 row-start-2 min-w-0 truncate font-mono text-xs @[680px]:row-start-1"
             title={protocolEntryPath(session.input_protocol)}
@@ -1561,6 +1643,11 @@ function SessionRow({
                 duration: formatDuration(sessionRuntimeMs(session, nowMs)),
               },
             )}
+            {session.output_tokens_per_second != null ? (
+              <span title={t("records.outputSpeed")}>
+                {` · ${session.output_tokens_per_second.toFixed(1)} tok/s`}
+              </span>
+            ) : null}
           </span>
           <time
             className="col-start-2 row-start-2 text-right tabular-nums @[680px]:col-start-4 @[680px]:row-start-1"
@@ -1587,6 +1674,7 @@ function RecordDetail({
   auditContent,
   auditLoading,
   auditError,
+  auditSettings,
   deleting,
   onBack,
   onDelete,
@@ -1603,6 +1691,7 @@ function RecordDetail({
   auditContent: AuditContent | null;
   auditLoading: boolean;
   auditError: string | null;
+  auditSettings: AuditSettings | null;
   deleting: boolean;
   onBack: () => void;
   onDelete: () => void;
@@ -1674,10 +1763,22 @@ function RecordDetail({
     };
   }, [childRoots]);
 
+  const exportEnvironment = useExportEnvironment(auditSettings);
+  // The same diagnosis context for copy and export: a record alone cannot
+  // show the session failures or settings that explain it.
+  const bundleContext = {
+    serviceLabel: serviceName,
+    session,
+    turns,
+    childrenByRoot,
+    serviceNames,
+    environment: exportEnvironment,
+  };
+
   const copyBundle = (includeBodies: boolean) => {
     const bundle = buildRecordBundle(record, auditContent, {
+      ...bundleContext,
       includeBodies,
-      serviceLabel: serviceName,
     });
     setBundleSize(includeBodies ? bundle.length : null);
     copyFeedback.copy(includeBodies ? "bundle" : "bundle-meta", bundle);
@@ -1698,8 +1799,8 @@ function RecordDetail({
 
   const exportBundle = (format: BundleFormat) => {
     const bundle = buildRecordBundle(record, auditContent, {
+      ...bundleContext,
       includeBodies: true,
-      serviceLabel: serviceName,
       format,
     });
     const filename = bundleFilename(record.id, format);

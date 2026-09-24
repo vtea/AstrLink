@@ -132,6 +132,7 @@ type recordSession struct {
 	plan                     *contract.ExecutionPlan
 	errorSummary             *contract.ErrorSummary
 	privacyRestore           *contract.PrivacyRestoreSummary
+	privacyBatch             string
 	attemptIndex             int
 	childCount               int
 	networkAttemptOpen       bool
@@ -524,6 +525,21 @@ func (session *recordSession) attachRequestCapture(request *http.Request) {
 	request.Body = &requestCaptureBody{ReadCloser: request.Body, session: session}
 }
 
+// captureUnreadRequestBody feeds the client body to the audit capture when the
+// request fails before any attempt reads it, e.g. every provider's circuit is
+// open. Reading stops one byte past the capture limit so truncation is marked.
+func (session *recordSession) captureUnreadRequestBody(request *http.Request) {
+	if session == nil || request == nil || session.requestCapture.complete {
+		return
+	}
+	body, ok := request.Body.(*requestCaptureBody)
+	if !ok {
+		return
+	}
+	limit := int64(session.requestCapture.maxBytes) + 1
+	_, _ = io.Copy(io.Discard, io.LimitReader(body, limit))
+}
+
 type requestCaptureBody struct {
 	io.ReadCloser
 	session *recordSession
@@ -579,6 +595,28 @@ func (session *recordSession) noteSelected(candidate endpoint.Resolved, plan con
 	}
 	planCopy := plan
 	session.plan = &planCopy
+}
+
+// noteAttemptedService attributes a failure that never reached a RoundTrip to
+// the provider it was prepared for. A real network attempt already recorded on
+// the root wins, matching the failure reported to the client.
+func (session *recordSession) noteAttemptedService(id contract.ServiceID) {
+	if session == nil || id == "" || session.endpointID != nil {
+		return
+	}
+	session.endpointID = &id
+}
+
+// noteCandidateRejected keeps a provider that was chosen but never called
+// visible on the root, e.g. a missing credential or an open circuit.
+func (session *recordSession) noteCandidateRejected(id contract.ServiceID, reason string) {
+	if session == nil || id == "" {
+		return
+	}
+	session.addEvent(contract.RequestEventRouted, contract.RequestStatusFailed, string(id)+" · "+reason)
+	event := &session.events[len(session.events)-1]
+	ended := event.StartedAt
+	event.EndedAt = &ended
 }
 
 // beginNetworkAttempt marks the start of a real RoundTrip. Candidate selection
@@ -715,6 +753,60 @@ func (session *recordSession) beginPrivacyAttempt() {
 		return
 	}
 	session.privacyRestore = nil
+	session.privacyBatch = ""
+}
+
+// beginPrivacyInspection opens the privacy phase before the detector runs. A
+// local model can spend minutes on a long agent transcript while the pending
+// row is otherwise not rewritten until the first RoundTrip, so without this a
+// live or exported record cannot show where the request is waiting.
+func (session *recordSession) beginPrivacyInspection(ctx context.Context, summary string) {
+	if session == nil {
+		return
+	}
+	session.addEvent(contract.RequestEventPrivacy, contract.RequestStatusPending, summary)
+	session.persistLiveMetadata(ctx)
+}
+
+// updatePrivacyInspection rewrites the open privacy phase as the detector
+// works through its batches. batch is kept so a detector failure can record
+// where the inspection stopped.
+func (session *recordSession) updatePrivacyInspection(ctx context.Context, summary, batch string) {
+	if session == nil {
+		return
+	}
+	session.privacyBatch = batch
+	for index := len(session.events) - 1; index >= 0; index-- {
+		event := &session.events[index]
+		if event.Kind != contract.RequestEventPrivacy || event.EndedAt != nil {
+			continue
+		}
+		event.Summary = sanitizeSummary(summary)
+		session.persistLiveMetadata(ctx)
+		return
+	}
+}
+
+func (session *recordSession) privacyInspectionBatch() string {
+	if session == nil {
+		return ""
+	}
+	return session.privacyBatch
+}
+
+// persistLiveMetadata refreshes the pending row without touching audit blobs.
+// A retry that is still staging its failed attempt holds a terminal status in
+// memory, so only a pending root is written; the next RoundTrip persists the
+// rest. It shares persistAvailableAudit's 500ms bound.
+func (session *recordSession) persistLiveMetadata(ctx context.Context) {
+	if session == nil || session.persistStore == nil || session.status != contract.RequestStatusPending {
+		return
+	}
+	persistCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	if err := session.persistStore.UpsertRequestRecord(persistCtx, session.recordSnapshot(nil, nil)); err != nil {
+		logRequestRecordFailure(session.persistLogf, "live_metadata_upsert", err)
+	}
 }
 
 func (session *recordSession) notePrivacyMapping(
@@ -994,6 +1086,7 @@ func (session *recordSession) finish(
 			privacyRestoreSummaryText(*session.privacyRestore),
 		)
 	}
+	session.settlePrivacyEvent()
 	session.settleAcceptedEvent()
 	session.addEvent(contract.RequestEventCompleted, session.status, session.completedSummary())
 	session.closeOpenEvents(time.Now().UTC())
@@ -1394,8 +1487,24 @@ func (session *recordSession) closeEventKind(kind contract.RequestEventKind, sta
 	session.addEvent(kind, status, summary)
 }
 
+// notePrivacyDecision closes the phase beginPrivacyInspection opened, so its
+// duration is the inspection itself. Paths that never inspect add a point.
 func (session *recordSession) notePrivacyDecision(summary string, status contract.RequestStatus) {
-	session.addEvent(contract.RequestEventPrivacy, status, summary)
+	session.closeEventKind(contract.RequestEventPrivacy, status, summary)
+}
+
+// settlePrivacyEvent ends an inspection the request left before a decision,
+// such as a client disconnect while the detector ran, with the final status.
+func (session *recordSession) settlePrivacyEvent() {
+	if session == nil {
+		return
+	}
+	for index := range session.events {
+		if session.events[index].Kind == contract.RequestEventPrivacy &&
+			session.events[index].Status == contract.RequestStatusPending {
+			session.events[index].Status = session.status
+		}
+	}
 }
 
 func (session *recordSession) captureOutputID() {

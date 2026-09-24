@@ -43,6 +43,7 @@ import {
   listRoutes,
   listServices,
   listRequestSessions,
+  listRequestRecords,
   listAccessTokens,
   listAccessTokenUsage,
   getUsageSummary,
@@ -51,6 +52,7 @@ import {
   probeLocalPrivacyModel,
   probeDraftServiceModels,
   probeServiceModels,
+  probeServiceProxy,
   testService,
   probePrivacyModel,
   revealAccessToken,
@@ -129,6 +131,35 @@ describe("desktop bridge contract", () => {
     });
   });
 
+  it("validates proxy probe responses without persisting draft credentials", async () => {
+    const input = {
+      proxy: {
+        mode: "custom" as const,
+        url: "socks5://localhost:1080",
+        credential: { username: "user", password: "" },
+      },
+      target_url: "https://provider.example",
+    };
+    invokeMock.mockResolvedValueOnce({ latency_ms: 10, status_code: 401 });
+    await expect(probeServiceProxy(input)).resolves.toEqual({
+      latency_ms: 10,
+      status_code: 401,
+    });
+    expect(invokeMock).toHaveBeenLastCalledWith("probe_service_proxy", {
+      input,
+    });
+    for (const result of [
+      { latency_ms: -1, status_code: 200 },
+      { latency_ms: 2, status_code: 407 },
+      { latency_ms: 2, status_code: "200" },
+    ]) {
+      invokeMock.mockResolvedValueOnce(result);
+      await expect(probeServiceProxy(input)).rejects.toThrow(
+        "Invalid proxy probe response",
+      );
+    }
+  });
+
   it("requests one aggregate for the complete usage window", async () => {
     const window = resolveUsageWindow("1d", new Date(2026, 8, 19, 12));
     invokeMock.mockResolvedValueOnce({
@@ -137,6 +168,7 @@ describe("desktop bridge contract", () => {
       by_hour: [],
       by_service: [],
       by_model: [],
+      by_token: [],
       scanned_records: 0,
     });
     const result = await getUsageSummary(window);
@@ -286,6 +318,24 @@ describe("desktop bridge contract", () => {
     await listRequestSessions();
     expect(invokeMock).toHaveBeenLastCalledWith("list_request_sessions", {
       query: {},
+    });
+  });
+
+  it("forwards multi-token record and session filters without changing detail fields", async () => {
+    invokeMock.mockResolvedValue({ items: [], next_cursor: null });
+    const query = {
+      limit: 20,
+      service_id: "service_a",
+      local_access_token_ids: ["token_a", "token_b"],
+      status: "failed" as const,
+    };
+    await listRequestRecords(query);
+    expect(invokeMock).toHaveBeenLastCalledWith("list_request_records", {
+      query,
+    });
+    await listRequestSessions({ ...query, kind: "inference" });
+    expect(invokeMock).toHaveBeenLastCalledWith("list_request_sessions", {
+      query: { ...query, kind: "inference" },
     });
   });
 
@@ -613,6 +663,8 @@ describe("desktop bridge contract", () => {
       allowlist_rules: [{ type: "domain_suffix", value: "github.com" }],
       restore_tool_arguments: true,
       placeholder_notice: true,
+      skip_tool_declarations: false,
+      inspect_additional_tools: false,
       match: {},
     };
     const etag = `"sha256:${"b".repeat(64)}"`;

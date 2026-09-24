@@ -7,7 +7,10 @@ import { appLog } from "./app-log";
 import { i18n } from "./i18n";
 import { notify } from "./notify";
 import type { RequestRecord } from "./request-record-model";
-import type { RequestServiceIdentity } from "./request-service-model";
+import type {
+  RequestServiceIdentity,
+  RequestServiceMap,
+} from "./request-service-model";
 import type { TrajectoryRow } from "./request-trajectory-model";
 import { getDesktopPlatform } from "./window-chrome";
 
@@ -31,6 +34,8 @@ export interface TrajectoryInspectorSelection {
   row: TrajectoryRow;
   record: RequestRecord;
   service?: RequestServiceIdentity;
+  /** Names for the providers the record's route events tried. */
+  services?: RequestServiceMap;
 }
 
 /** What an inspector window pulls on mount instead of waiting to be told. */

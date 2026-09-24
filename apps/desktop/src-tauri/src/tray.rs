@@ -19,14 +19,16 @@ use serde::{Deserialize, Serialize};
 use tauri::{
     menu::{IsMenuItem, Menu, MenuItem, MenuItemKind, PredefinedMenuItem},
     tray::{MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, PhysicalPosition, Rect, WebviewUrl,
-    WebviewWindowBuilder, Wry,
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Monitor, PhysicalPosition, Rect,
+    WebviewUrl, WebviewWindowBuilder, Wry,
 };
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
 use crate::{
     i18n::{self, Locale},
-    preferences::{PreferencesStore, TrayMenubarText, TrayPreferences, TrayUsagePreferences},
+    preferences::{
+        PreferencesStore, QuotaDisplayMode, TrayMenubarText, TrayPreferences, TrayUsagePreferences,
+    },
     sidecar::{CoreManager, CorePhase, CoreView},
 };
 
@@ -240,6 +242,7 @@ pub fn tray_model(
     prefs: &TrayPreferences,
     digest: Option<&UsageDigest>,
     locale: Locale,
+    quota_display_mode: QuotaDisplayMode,
 ) -> TrayModel {
     let (mut status_text, icon) = status_line(view, locale);
     if let Some(fallback) = &view.inference_port_fallback {
@@ -265,7 +268,7 @@ pub fn tray_model(
         }
     }
 
-    let title = menubar_title(view, prefs.menubar_text, digest, locale);
+    let title = menubar_title(view, prefs.menubar_text, digest, locale, quota_display_mode);
     let tooltip_body = match &title {
         Some(title) if !cfg!(target_os = "macos") => format!("{status_text} · {title}"),
         _ => status_text,
@@ -310,6 +313,7 @@ fn menubar_title(
     choice: TrayMenubarText,
     digest: Option<&UsageDigest>,
     locale: Locale,
+    quota_display_mode: QuotaDisplayMode,
 ) -> Option<String> {
     if choice == TrayMenubarText::None {
         return None;
@@ -342,7 +346,7 @@ fn menubar_title(
             .fold(None, |highest: Option<f64>, percent| {
                 Some(highest.map_or(percent, |value| value.max(percent)))
             })
-            .map(|percent| format!("{}%", percent.round().clamp(0.0, 999.0) as i64)),
+            .map(|percent| format!("{}%", quota_display_mode.percent(percent).round() as i64)),
         TrayMenubarText::None | TrayMenubarText::AlertOnly => None,
     }
 }
@@ -678,6 +682,20 @@ pub enum PlanRefresh {
     Force,
 }
 
+/// The usage lines to collect: the enabled cards plus whatever the menu-bar
+/// text reads, so the menu bar does not go blank when its card is turned off.
+/// The popover gates each card on the preference, not on the data.
+fn collected_usage(tray: &TrayPreferences) -> TrayUsagePreferences {
+    let mut usage = tray.usage.clone();
+    match tray.menubar_text {
+        TrayMenubarText::Requests | TrayMenubarText::Tokens => usage.today = true,
+        TrayMenubarText::Cost => usage.cost = true,
+        TrayMenubarText::Subscription => usage.subscription_windows = true,
+        TrayMenubarText::None | TrayMenubarText::AlertOnly => {}
+    }
+    usage
+}
+
 /// Pulls only what the enabled cards need. Local numbers are always
 /// collected; plan windows follow `plans` against the cached `previous`.
 async fn collect_digest(
@@ -845,11 +863,8 @@ fn anchor_from_click(
     position: PhysicalPosition<f64>,
     rect: Rect,
 ) -> Option<PopoverAnchor> {
-    let monitor = app
-        .monitor_from_point(position.x, position.y)
-        .ok()
-        .flatten()
-        .or_else(|| app.primary_monitor().ok().flatten())?;
+    let monitor =
+        monitor_at_click(app, position).or_else(|| app.primary_monitor().ok().flatten())?;
     let scale = monitor.scale_factor();
     let icon_position = rect.position.to_logical::<f64>(scale);
     let icon_size = rect.size.to_logical::<f64>(scale);
@@ -870,6 +885,30 @@ fn anchor_from_click(
             height: work_size.height,
         },
     })
+}
+
+/// The monitor under a tray click. On macOS tray-icon reports the click in
+/// points scaled by the clicked screen's backing factor, but the monitor
+/// lookup takes raw points (`CGDisplayBounds`): on a Retina screen the scaled
+/// click lands on the neighbouring display, or on none at all, so a dual
+/// screen setup opened the popover on the other screen. tao's cursor position
+/// is points scaled by the primary display instead, which divides back
+/// exactly.
+#[cfg(target_os = "macos")]
+fn monitor_at_click(app: &AppHandle, _position: PhysicalPosition<f64>) -> Option<Monitor> {
+    let primary = app.primary_monitor().ok().flatten()?;
+    let cursor = app
+        .cursor_position()
+        .ok()?
+        .to_logical::<f64>(primary.scale_factor());
+    app.monitor_from_point(cursor.x, cursor.y).ok().flatten()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn monitor_at_click(app: &AppHandle, position: PhysicalPosition<f64>) -> Option<Monitor> {
+    app.monitor_from_point(position.x, position.y)
+        .ok()
+        .flatten()
 }
 
 // ---------------------------------------------------------------------------
@@ -978,6 +1017,7 @@ pub fn refresh(app: &AppHandle) {
         &preferences.tray,
         digest.as_ref(),
         preferences.locale,
+        preferences.quota_display_mode,
     );
     let changed = {
         let mut runtime = state.lock();
@@ -1132,8 +1172,11 @@ fn render(app: &AppHandle, model: &TrayModel) -> Result<(), String> {
         tray.set_tooltip(Some(&model.tooltip))
             .map_err(|error| error.to_string())?;
     }
+    // tray-icon ignores a `None` title on macOS instead of clearing it, so
+    // "none", "alerts only" and a figure with no data yet would keep showing
+    // the previous choice's text. An empty title clears it.
     #[cfg(target_os = "macos")]
-    tray.set_title(model.title.as_deref())
+    tray.set_title(Some(model.title.as_deref().unwrap_or("")))
         .map_err(|error| error.to_string())?;
     Ok(())
 }
@@ -1143,7 +1186,13 @@ fn render(app: &AppHandle, model: &TrayModel) -> Result<(), String> {
 /// native fallback menu because its tray never reports clicks.
 pub fn build(app: &AppHandle) -> tauri::Result<()> {
     let preferences = preferences_of(app);
-    let model = tray_model(&core_view(app), &preferences.tray, None, preferences.locale);
+    let model = tray_model(
+        &core_view(app),
+        &preferences.tray,
+        None,
+        preferences.locale,
+        preferences.quota_display_mode,
+    );
     // macOS gets the monochrome glyph set; the colour mark with its red badge
     // is for Windows and Linux trays.
     let (image, template) = icon_for(model.icon);
@@ -1470,7 +1519,7 @@ pub async fn refresh_usage(app: AppHandle, plans: PlanRefresh) {
     if manager.view().phase != CorePhase::Ready {
         return;
     }
-    let prefs = preferences_of(&app).tray.usage;
+    let prefs = collected_usage(&preferences_of(&app).tray);
     let previous = {
         let mut runtime = state.lock();
         if runtime.refresh_in_flight {
@@ -1726,6 +1775,7 @@ mod tests {
             &TrayPreferences::default(),
             Some(&digest()),
             Locale::ZhCN,
+            QuotaDisplayMode::Remaining,
         );
         assert_eq!(model.icon, TrayIconState::Ready);
         assert_eq!(model.title, None);
@@ -1734,13 +1784,25 @@ mod tests {
         let mut stopped = ready_view();
         stopped.phase = CorePhase::Stopped;
         stopped.inference_url = None;
-        let model = tray_model(&stopped, &TrayPreferences::default(), None, Locale::En);
+        let model = tray_model(
+            &stopped,
+            &TrayPreferences::default(),
+            None,
+            Locale::En,
+            QuotaDisplayMode::Remaining,
+        );
         assert_eq!(model.tooltip, "AstrLink · Gateway stopped");
         assert_eq!(model.icon, TrayIconState::Idle);
 
         let mut starting = ready_view();
         starting.phase = CorePhase::Handshaking;
-        let model = tray_model(&starting, &TrayPreferences::default(), None, Locale::En);
+        let model = tray_model(
+            &starting,
+            &TrayPreferences::default(),
+            None,
+            Locale::En,
+            QuotaDisplayMode::Remaining,
+        );
         assert_eq!(model.tooltip, "AstrLink · Gateway starting…");
         assert_eq!(model.icon, TrayIconState::Idle);
     }
@@ -1749,7 +1811,13 @@ mod tests {
     fn an_agent_reading_records_switches_to_the_watched_icon() {
         let mut watched = ready_view();
         watched.observer_active = true;
-        let model = tray_model(&watched, &TrayPreferences::default(), None, Locale::ZhCN);
+        let model = tray_model(
+            &watched,
+            &TrayPreferences::default(),
+            None,
+            Locale::ZhCN,
+            QuotaDisplayMode::Remaining,
+        );
         assert_eq!(model.icon, TrayIconState::Watched);
         assert_eq!(
             model.tooltip,
@@ -1757,7 +1825,13 @@ mod tests {
         );
         // Only a running gateway can be read; the badge drops with it.
         watched.phase = CorePhase::Error;
-        let model = tray_model(&watched, &TrayPreferences::default(), None, Locale::ZhCN);
+        let model = tray_model(
+            &watched,
+            &TrayPreferences::default(),
+            None,
+            Locale::ZhCN,
+            QuotaDisplayMode::Remaining,
+        );
         assert_eq!(model.icon, TrayIconState::Idle);
     }
 
@@ -1777,7 +1851,13 @@ mod tests {
             menubar_text: TrayMenubarText::Tokens,
             ..TrayPreferences::default()
         };
-        let model = tray_model(&view, &prefs, None, Locale::ZhCN);
+        let model = tray_model(
+            &view,
+            &prefs,
+            None,
+            Locale::ZhCN,
+            QuotaDisplayMode::Remaining,
+        );
         assert!(model
             .tooltip
             .starts_with("AstrLink · 网关异常退出 · astrlink-core"));
@@ -1801,7 +1881,13 @@ mod tests {
             requested_port: 8317,
             active_port: 8324,
         });
-        let model = tray_model(&view, &TrayPreferences::default(), None, Locale::ZhCN);
+        let model = tray_model(
+            &view,
+            &TrayPreferences::default(),
+            None,
+            Locale::ZhCN,
+            QuotaDisplayMode::Remaining,
+        );
         assert_eq!(
             model.tooltip,
             "AstrLink · 网关运行中 · 127.0.0.1:8324 · 8317 被占用，已改用 8324"
@@ -1815,7 +1901,7 @@ mod tests {
             (TrayMenubarText::Requests, Some("128")),
             (TrayMenubarText::Tokens, Some("1.2M")),
             (TrayMenubarText::Cost, Some("$0.83")),
-            (TrayMenubarText::Subscription, Some("62%")),
+            (TrayMenubarText::Subscription, Some("38%")),
             (TrayMenubarText::AlertOnly, None),
         ];
         for (choice, expected) in cases {
@@ -1823,7 +1909,13 @@ mod tests {
                 menubar_text: choice,
                 ..TrayPreferences::default()
             };
-            let model = tray_model(&ready_view(), &prefs, Some(&digest()), Locale::En);
+            let model = tray_model(
+                &ready_view(),
+                &prefs,
+                Some(&digest()),
+                Locale::En,
+                QuotaDisplayMode::Remaining,
+            );
             assert_eq!(model.title.as_deref(), expected, "{choice:?}");
         }
         // Without a digest there is nothing to show yet.
@@ -1832,9 +1924,87 @@ mod tests {
             ..TrayPreferences::default()
         };
         assert_eq!(
-            tray_model(&ready_view(), &prefs, None, Locale::En).title,
+            tray_model(
+                &ready_view(),
+                &prefs,
+                None,
+                Locale::En,
+                QuotaDisplayMode::Remaining
+            )
+            .title,
             None
         );
+    }
+
+    #[test]
+    fn subscription_title_tracks_the_most_depleted_window_in_both_modes() {
+        let prefs = TrayPreferences {
+            menubar_text: TrayMenubarText::Subscription,
+            ..TrayPreferences::default()
+        };
+        let mut usage = digest();
+        let mut second = usage.subscriptions[0].clone();
+        second.windows[0].used_percent = 87.0;
+        usage.subscriptions.push(second);
+        for (mode, expected) in [
+            (QuotaDisplayMode::Remaining, "13%"),
+            (QuotaDisplayMode::Used, "87%"),
+        ] {
+            assert_eq!(
+                tray_model(&ready_view(), &prefs, Some(&usage), Locale::En, mode)
+                    .title
+                    .as_deref(),
+                Some(expected)
+            );
+        }
+        usage.subscriptions[1].windows[0].used_percent = 120.0;
+        assert_eq!(
+            tray_model(
+                &ready_view(),
+                &prefs,
+                Some(&usage),
+                Locale::En,
+                QuotaDisplayMode::Remaining
+            )
+            .title
+            .as_deref(),
+            Some("0%")
+        );
+        assert_eq!(
+            tray_model(
+                &ready_view(),
+                &prefs,
+                None,
+                Locale::En,
+                QuotaDisplayMode::Remaining
+            )
+            .title,
+            None
+        );
+    }
+
+    #[test]
+    fn menubar_figure_is_collected_even_with_its_card_off() {
+        let off = TrayUsagePreferences {
+            today: false,
+            cost: false,
+            subscription_windows: false,
+            top_model: false,
+            ..TrayUsagePreferences::default()
+        };
+        let collect = |menubar_text| {
+            collected_usage(&TrayPreferences {
+                menubar_text,
+                usage: off.clone(),
+                ..TrayPreferences::default()
+            })
+        };
+        assert!(collect(TrayMenubarText::Requests).today);
+        assert!(collect(TrayMenubarText::Tokens).today);
+        assert!(collect(TrayMenubarText::Cost).cost);
+        assert!(collect(TrayMenubarText::Subscription).subscription_windows);
+        assert_eq!(collect(TrayMenubarText::None), off);
+        assert_eq!(collect(TrayMenubarText::AlertOnly), off);
     }
 
     #[test]

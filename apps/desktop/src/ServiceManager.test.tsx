@@ -23,6 +23,7 @@ const bridgeMocks = vi.hoisted(() => ({
   openAuthorizationURL: vi.fn(),
   probeDraftServiceModels: vi.fn(),
   probeServiceModels: vi.fn(),
+  probeServiceProxy: vi.fn(),
   testService: vi.fn(),
   updateService: vi.fn(),
 }));
@@ -41,6 +42,8 @@ import { ServiceManager } from "./ServiceManager";
 import { SERVICE_ORDER_GUIDE_KEY } from "./ServiceOrderHelp";
 import { parseService, type Service } from "./service-model";
 import { httpServicePreset } from "./service-presets";
+import { WorkspaceSnapshotProvider } from "./workspace-snapshots";
+import type { SubscriptionUsage } from "./subscription-usage-model";
 
 const timestamp = "2026-07-28T12:00:00Z";
 const etag = `"sha256:${"a".repeat(64)}"`;
@@ -634,7 +637,7 @@ describe("ServiceManager", () => {
         'input[aria-label="代理密码（可选）"]',
       )?.value,
     ).toBe("");
-    expect(container.textContent).toContain("代理认证已保存");
+    expect(container.textContent).toContain("保留已保存认证");
     await chooseOption("代理模式", "继承全局");
     await act(async () =>
       container
@@ -649,6 +652,111 @@ describe("ServiceManager", () => {
       expect.objectContaining({ proxy: null }),
     );
   });
+
+  it.each([
+    {
+      url: "socks5://user:secret@127.0.0.1:1080",
+      username: "user",
+      password: "secret",
+      credential: { username: "user", password: "secret" },
+    },
+    {
+      url: "socks5://user:@127.0.0.1:1080",
+      username: "user",
+      password: "",
+      credential: { username: "user", password: "" },
+    },
+    {
+      url: "socks5://127.0.0.1:1080",
+      username: "",
+      password: "",
+      credential: undefined,
+    },
+  ])(
+    "tests and saves a proxy draft with password '$password'",
+    async ({ url, username, password, credential }) => {
+      const service: Service = {
+        ...gatewayService,
+        proxy: {
+          mode: "custom",
+          url: "socks5://127.0.0.1:1080",
+          credential_ref: `local://service-proxy/${gatewayService.id}`,
+        },
+      };
+      bridgeMocks.getService.mockResolvedValue({ service, etag });
+      bridgeMocks.updateService.mockResolvedValue({ service, etag });
+      bridgeMocks.probeServiceProxy.mockResolvedValue({
+        latency_ms: 23,
+        status_code: 401,
+      });
+      await act(async () =>
+        root.render(
+          <ServiceManager
+            catalogError={null}
+            catalogStatus="ready"
+            isReady
+            onDirtyChange={() => {}}
+            onRefresh={() => {}}
+            onServiceRemoved={() => {}}
+            onServiceSaved={() => {}}
+            onViewChange={() => {}}
+            protocols={[]}
+            services={[service]}
+            view={{ kind: "edit", serviceId: service.id }}
+          />,
+        ),
+      );
+      const address = container.querySelector<HTMLInputElement>(
+        'input[aria-label="代理地址"]',
+      )!;
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,
+          "value",
+        )!.set!.call(address, url);
+        address.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      expect(address.value).toBe("socks5://127.0.0.1:1080");
+      expect(
+        container.querySelector<HTMLInputElement>(
+          'input[aria-label="代理用户名（可选）"]',
+        )!.value,
+      ).toBe(username);
+      expect(
+        container.querySelector<HTMLInputElement>(
+          'input[aria-label="代理密码（可选）"]',
+        )!.value,
+      ).toBe(password);
+      const proxy = {
+        mode: "custom",
+        url: "socks5://127.0.0.1:1080",
+        ...(credential ? { credential } : {}),
+      };
+      const testButton = [...container.querySelectorAll("button")].find(
+        (button) => button.textContent === "测试连通性",
+      )!;
+      await act(async () => testButton.click());
+      expect(bridgeMocks.probeServiceProxy).toHaveBeenCalledWith({
+        service_id: service.id,
+        proxy,
+        target_url: service.http!.base_url,
+      });
+      expect(bridgeMocks.updateService).not.toHaveBeenCalled();
+      expect(container.textContent).toContain("已收到 HTTP 401 响应");
+      await act(async () =>
+        container
+          .querySelector("form")!
+          .dispatchEvent(
+            new Event("submit", { bubbles: true, cancelable: true }),
+          ),
+      );
+      expect(bridgeMocks.updateService).toHaveBeenCalledWith(
+        service.id,
+        etag,
+        expect.objectContaining({ proxy }),
+      );
+    },
+  );
 
   it("creates a Claude subscription with its own authorization flow", async () => {
     const claude: Service = {
@@ -998,10 +1106,12 @@ describe("ServiceManager", () => {
       ),
     ).toHaveLength(2);
     expect(container.textContent).not.toContain("Logout is local-only");
-    expect(bridgeMocks.getServiceUsage).not.toHaveBeenCalled();
-    expect(
-      container.querySelector('[data-testid="subscription-usage"]'),
-    ).toBeNull();
+    // Only the New API key has a quota to read; both Codex rows are disconnected.
+    expect(bridgeMocks.getServiceUsage).toHaveBeenCalledTimes(1);
+    expect(bridgeMocks.getServiceUsage).toHaveBeenCalledWith(
+      gatewayService.id,
+      { fresh: false },
+    );
   });
 
   it("combines status and search filters and clears both from an empty result", async () => {
@@ -1274,7 +1384,317 @@ describe("ServiceManager", () => {
     ]);
   });
 
-  it("shows the provider plan quota on a Kimi coding plan row", async () => {
+  it("suggests configured model names for the model filter", async () => {
+    const services: Service[] = [
+      { ...gatewayService, id: "service_first", name: "First gateway" },
+      {
+        ...gatewayService,
+        id: "service_second",
+        name: "Second gateway",
+        models: ["gpt-5.4", "claude-sonnet-4-5"],
+      },
+      codexService,
+    ];
+    bridgeMocks.getServiceOrder.mockResolvedValueOnce({
+      service_ids: services.map((service) => service.id),
+      etag,
+    });
+    await act(async () =>
+      root.render(
+        <ServiceManager
+          catalogError={null}
+          catalogStatus="ready"
+          isReady
+          services={services}
+          protocols={[]}
+          view={{ kind: "list" }}
+          onDirtyChange={() => {}}
+          onRefresh={() => {}}
+          onServiceRemoved={() => {}}
+          onServiceSaved={() => {}}
+          onViewChange={() => {}}
+        />,
+      ),
+    );
+    const modelSearch = container.querySelector<HTMLInputElement>(
+      'input[aria-label="按模型名筛选 API 提供商"]',
+    )!;
+    const suggestions = () =>
+      [...document.querySelectorAll<HTMLElement>('[role="option"]')].map(
+        (option) => option.textContent,
+      );
+    await act(async () => modelSearch.click());
+    expect(suggestions()).toEqual(["claude-sonnet-4-5", "gpt-5", "gpt-5.4"]);
+
+    const setter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    )!.set!;
+    await act(async () => {
+      setter.call(modelSearch, " GPT-5.");
+      modelSearch.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(suggestions()).toEqual(["gpt-5.4"]);
+    await act(async () =>
+      document.querySelector<HTMLElement>('[role="option"]')!.click(),
+    );
+    expect(modelSearch.value).toBe("gpt-5.4");
+    expect(
+      [...container.querySelectorAll('[data-testid="service-card"]')].map(
+        (row) => row.getAttribute("aria-label"),
+      ),
+    ).toEqual(["Second gateway"]);
+
+    // The service search is empty, so the only clear-search button belongs to the model filter.
+    const clear = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="清除搜索"]',
+    )!;
+    await act(async () => clear.click());
+    expect(modelSearch.value).toBe("");
+    expect(
+      container.querySelectorAll('[data-testid="service-card"]'),
+    ).toHaveLength(3);
+  });
+
+  it.each(["ready", "error"] as const)(
+    "renders the list while quotas load independently, including %s, and preserves settled data on refresh",
+    async (outcome) => {
+      const connected = [codexService, secondCodexService].map((service) => ({
+        ...service,
+        subscription: {
+          ...service.subscription!,
+          status: "connected" as const,
+        },
+      }));
+      const requests = connected.map(() => {
+        let resolve!: (value: SubscriptionUsage) => void;
+        let reject!: (cause: Error) => void;
+        const promise = new Promise<SubscriptionUsage>((done, fail) => {
+          resolve = done;
+          reject = fail;
+        });
+        return { promise, resolve, reject };
+      });
+      for (const request of requests) {
+        bridgeMocks.getServiceUsage.mockImplementationOnce(
+          () => request.promise,
+        );
+      }
+      const renderList = async (show: boolean) =>
+        act(async () =>
+          root.render(
+            <WorkspaceSnapshotProvider sessionKey="quota-session">
+              {show ? (
+                <ServiceManager
+                  catalogError={null}
+                  catalogStatus="ready"
+                  isReady
+                  onDirtyChange={() => {}}
+                  onRefresh={() => {}}
+                  onServiceRemoved={() => {}}
+                  onServiceSaved={() => {}}
+                  onViewChange={() => {}}
+                  protocols={[]}
+                  services={connected}
+                  view={{ kind: "list" }}
+                />
+              ) : null}
+            </WorkspaceSnapshotProvider>,
+          ),
+        );
+      await renderList(true);
+      expect(
+        container.querySelectorAll('[data-testid="service-card"]'),
+      ).toHaveLength(2);
+      expect(container.querySelector('[aria-busy="true"]')).not.toBeNull();
+      const usage = (index: number): SubscriptionUsage => ({
+        service_id: connected[index].id,
+        fetched_at: timestamp,
+        secondary: { used_percent: 86, limit_window_seconds: 604_800 },
+      });
+      const initialRows = [
+        ...container.querySelectorAll('[data-testid="service-card"]'),
+      ];
+      await act(async () => requests[0].resolve(usage(0)));
+      expect([
+        ...container.querySelectorAll('[data-testid="service-card"]'),
+      ]).toEqual(initialRows);
+      expect(
+        container.querySelectorAll(
+          '[data-testid="subscription-usage"][aria-busy]',
+        ),
+      ).toHaveLength(1);
+      // A slow quota request must not hold back either provider row.
+      expect(
+        container.querySelectorAll('[data-testid="service-card"]'),
+      ).toHaveLength(2);
+      const log = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        await act(async () => {
+          if (outcome === "ready") requests[1].resolve(usage(1));
+          else requests[1].reject(new Error("Quota temporarily unavailable"));
+        });
+        expect(
+          container.querySelectorAll('[data-testid="service-card"]'),
+        ).toHaveLength(2);
+        expect(
+          container.querySelector(
+            '[data-testid="subscription-usage"][aria-busy]',
+          ),
+        ).toBeNull();
+        expect(container.querySelectorAll('[role="progressbar"]')).toHaveLength(
+          outcome === "ready" ? 2 : 1,
+        );
+        if (outcome === "error")
+          expect(container.textContent).toContain("无法读取额度");
+
+        // Re-entry and manual refresh both keep the settled snapshot visible.
+        await renderList(false);
+        for (let index = 0; index < 4; index++) {
+          bridgeMocks.getServiceUsage.mockImplementationOnce(
+            () => new Promise(() => {}),
+          );
+        }
+        await renderList(true);
+        const row = container.querySelector('[data-testid="service-card"]');
+        expect(row).not.toBeNull();
+        expect(
+          container.querySelector(
+            '[data-testid="subscription-usage"][aria-busy]',
+          ),
+        ).toBeNull();
+        await act(async () =>
+          container
+            .querySelector<HTMLButtonElement>('button[aria-label="刷新列表"]')!
+            .click(),
+        );
+        expect(container.querySelector('[data-testid="service-card"]')).toBe(
+          row,
+        );
+        expect(
+          container.querySelector(
+            '[data-testid="subscription-usage"][aria-busy]',
+          ),
+        ).toBeNull();
+        if (outcome === "error")
+          expect(container.textContent).toContain("无法读取额度");
+      } finally {
+        log.mockRestore();
+      }
+    },
+  );
+
+  it.each(["ready", "error"] as const)(
+    "retries only the failed quota, prevents duplicate requests, and handles %s",
+    async (outcome) => {
+      const connected = [codexService, secondCodexService].map((service) => ({
+        ...service,
+        subscription: {
+          ...service.subscription!,
+          status: "connected" as const,
+        },
+      }));
+      let resolveOther!: (usage: SubscriptionUsage) => void;
+      let resolveRetry!: (usage: SubscriptionUsage) => void;
+      let rejectRetry!: (cause: Error) => void;
+      bridgeMocks.getServiceUsage
+        .mockRejectedValueOnce(new Error("Quota temporarily unavailable"))
+        .mockImplementationOnce(
+          () =>
+            new Promise<SubscriptionUsage>((resolve) => {
+              resolveOther = resolve;
+            }),
+        )
+        .mockImplementationOnce(
+          () =>
+            new Promise<SubscriptionUsage>((resolve, reject) => {
+              resolveRetry = resolve;
+              rejectRetry = reject;
+            }),
+        );
+      const onRefresh = vi.fn();
+      const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        await act(async () => {
+          root.render(
+            <ServiceManager
+              catalogError={null}
+              catalogStatus="ready"
+              isReady
+              onDirtyChange={() => {}}
+              onRefresh={onRefresh}
+              onServiceRemoved={() => {}}
+              onServiceSaved={() => {}}
+              onViewChange={() => {}}
+              protocols={[]}
+              services={connected}
+              view={{ kind: "list" }}
+            />,
+          );
+        });
+        const failedRow = container.querySelector(
+          '[data-testid="service-card"][aria-label="Codex personal"]',
+        )!;
+        const refresh = failedRow.querySelector<HTMLButtonElement>(
+          'button[aria-label="刷新"]',
+        )!;
+        expect(refresh).not.toBeNull();
+        await act(async () => {
+          refresh.click();
+          refresh.click();
+        });
+        expect(bridgeMocks.getServiceUsage).toHaveBeenCalledTimes(3);
+        expect(bridgeMocks.getServiceUsage).toHaveBeenLastCalledWith(
+          connected[0].id,
+          { fresh: true },
+        );
+        expect(onRefresh).not.toHaveBeenCalled();
+        expect(refresh.disabled).toBe(true);
+        expect(refresh.getAttribute("aria-label")).toBe("刷新中…");
+        expect(refresh.querySelector(".animate-spin")).not.toBeNull();
+        expect(failedRow.textContent).toContain("无法读取额度");
+        expect(failedRow.querySelector("details")?.open).toBe(false);
+
+        // Retrying one row must not invalidate another row's in-flight request.
+        await act(async () => {
+          resolveOther({
+            service_id: connected[1].id,
+            fetched_at: timestamp,
+            secondary: { used_percent: 20, limit_window_seconds: 604_800 },
+          });
+          if (outcome === "ready") {
+            resolveRetry({
+              service_id: connected[0].id,
+              fetched_at: timestamp,
+              secondary: { used_percent: 30, limit_window_seconds: 604_800 },
+            });
+          } else {
+            rejectRetry(new Error("Provider is still unavailable"));
+          }
+        });
+        expect(container.querySelectorAll('[role="progressbar"]')).toHaveLength(
+          outcome === "ready" ? 2 : 1,
+        );
+        if (outcome === "ready") {
+          expect(failedRow.textContent).not.toContain("无法读取额度");
+          expect(
+            failedRow.querySelector('button[aria-label="刷新"]'),
+          ).toBeNull();
+        } else {
+          expect(failedRow.textContent).toContain(
+            "Provider is still unavailable",
+          );
+          expect(refresh.disabled).toBe(false);
+          expect(refresh.getAttribute("aria-label")).toBe("刷新");
+          expect(refresh.querySelector(".animate-spin")).toBeNull();
+        }
+      } finally {
+        logged.mockRestore();
+      }
+    },
+  );
+
+  it("shows the provider plan quota on Kimi and New API key rows", async () => {
     const kimi: Service = {
       id: "service_kimi_plan",
       name: "Kimi Coding",
@@ -1292,21 +1712,35 @@ describe("ServiceManager", () => {
       created_at: timestamp,
       updated_at: timestamp,
     };
-    bridgeMocks.getServiceUsage.mockResolvedValue({
-      service_id: kimi.id,
-      fetched_at: "2026-09-22T11:00:00Z",
-      limit_reached: false,
-      primary: {
-        used_percent: 25,
-        limit_window_seconds: 18_000,
-        reset_at: "2026-09-22T15:00:00Z",
-      },
-      secondary: {
-        used_percent: 10,
-        limit_window_seconds: 604_800,
-        reset_at: "2026-09-25T00:00:00Z",
-      },
-    });
+    bridgeMocks.getServiceUsage.mockImplementation(async (id: string) =>
+      id === kimi.id
+        ? {
+            service_id: kimi.id,
+            fetched_at: "2026-09-22T11:00:00Z",
+            limit_reached: false,
+            primary: {
+              used_percent: 25,
+              limit_window_seconds: 18_000,
+              reset_at: "2026-09-22T15:00:00Z",
+            },
+            secondary: {
+              used_percent: 10,
+              limit_window_seconds: 604_800,
+              reset_at: "2026-09-25T00:00:00Z",
+            },
+          }
+        : {
+            service_id: gatewayService.id,
+            fetched_at: "2026-09-22T11:00:00Z",
+            limit_reached: false,
+            quota: {
+              unlimited: false,
+              used_usd: "7.5",
+              remaining_usd: "2.5",
+              total_usd: "10",
+            },
+          },
+    );
 
     await act(async () => {
       root.render(
@@ -1330,13 +1764,29 @@ describe("ServiceManager", () => {
       await Promise.resolve();
     });
 
-    // Only the coding plan row queries usage: the gateway has no quota API and
-    // the Codex row is disconnected.
-    expect(bridgeMocks.getServiceUsage).toHaveBeenCalledTimes(1);
-    expect(bridgeMocks.getServiceUsage).toHaveBeenCalledWith(kimi.id, { fresh: false });
+    // The coding plan and the New API key query usage; the Codex row is
+    // disconnected.
+    expect(bridgeMocks.getServiceUsage).toHaveBeenCalledTimes(2);
+    expect(bridgeMocks.getServiceUsage).toHaveBeenCalledWith(kimi.id, {
+      fresh: false,
+    });
+    expect(bridgeMocks.getServiceUsage).toHaveBeenCalledWith(
+      gatewayService.id,
+      { fresh: false },
+    );
     expect(
       container.querySelectorAll('[data-testid="subscription-usage"]'),
-    ).toHaveLength(1);
+    ).toHaveLength(2);
+    const keyQuota = container.querySelector(
+      '[data-testid="subscription-usage-quota"]',
+    );
+    expect(keyQuota?.getAttribute("data-tone")).toBe("ok");
+    expect(
+      keyQuota
+        ?.querySelector('[role="progressbar"][aria-label="密钥额度"]')
+        ?.getAttribute("aria-valuetext"),
+    ).toBe("剩余 25%");
+    expect(keyQuota?.textContent).toContain("剩余 $2.50 / $10.00");
     const rollingQuota = container.querySelector(
       '[role="progressbar"][aria-label="5 小时"]',
     );
@@ -1388,7 +1838,9 @@ describe("ServiceManager", () => {
           />,
         );
       });
-      expect(bridgeMocks.getServiceUsage).toHaveBeenCalledWith(connected.id, { fresh: false });
+      expect(bridgeMocks.getServiceUsage).toHaveBeenCalledWith(connected.id, {
+        fresh: false,
+      });
       expect(
         container.querySelector('[data-testid="subscription-plan"]')
           ?.textContent,
@@ -1450,7 +1902,15 @@ describe("ServiceManager", () => {
           onServiceSaved={() => {}}
           onViewChange={() => {}}
           protocols={[]}
-          services={[connected, gatewayService]}
+          services={[
+            connected,
+            {
+              ...gatewayService,
+              id: "service_compatible",
+              name: "compatible",
+              kind: "openai_compatible",
+            },
+          ]}
           view={{ kind: "list" }}
         />,
       );
@@ -1461,7 +1921,9 @@ describe("ServiceManager", () => {
     });
 
     expect(bridgeMocks.getServiceUsage).toHaveBeenCalledTimes(1);
-    expect(bridgeMocks.getServiceUsage).toHaveBeenCalledWith(connected.id, { fresh: false });
+    expect(bridgeMocks.getServiceUsage).toHaveBeenCalledWith(connected.id, {
+      fresh: false,
+    });
     expect(
       container.querySelector('[data-testid="subscription-plan"]')?.textContent,
     ).toBe("Plus");
@@ -1573,7 +2035,9 @@ describe("ServiceManager", () => {
       await Promise.resolve();
     });
     expect(bridgeMocks.resetServiceUsage).toHaveBeenCalledWith(connected.id);
-    expect(bridgeMocks.getServiceUsage).toHaveBeenLastCalledWith(connected.id, { fresh: true });
+    expect(bridgeMocks.getServiceUsage).toHaveBeenLastCalledWith(connected.id, {
+      fresh: true,
+    });
     expect(notifyMocks.success).toHaveBeenCalledWith("额度已重置。");
   });
 
@@ -2719,20 +3183,31 @@ describe("ServiceManager", () => {
     await act(async () => {
       count?.click();
     });
-    expect(changed).toHaveBeenCalledWith({ kind: "edit", serviceId: gatewayService.id, tab: "models" });
+    expect(changed).toHaveBeenCalledWith({
+      kind: "edit",
+      serviceId: gatewayService.id,
+      tab: "models",
+    });
 
     // The host routes that view back in; the editor lands on the models tab.
     await act(async () => {
       root.render(
-        <ServiceManager {...props} view={{ kind: "edit", serviceId: gatewayService.id, tab: "models" }} />,
+        <ServiceManager
+          {...props}
+          view={{ kind: "edit", serviceId: gatewayService.id, tab: "models" }}
+        />,
       );
       await Promise.resolve();
     });
     expect(
-      container.querySelector('[data-testid="service-editor-tab-models"]')?.getAttribute("data-state"),
+      container
+        .querySelector('[data-testid="service-editor-tab-models"]')
+        ?.getAttribute("data-state"),
     ).toBe("active");
     expect(
-      container.querySelector('[data-testid="service-editor-tab-connection"]')?.getAttribute("data-state"),
+      container
+        .querySelector('[data-testid="service-editor-tab-connection"]')
+        ?.getAttribute("data-state"),
     ).toBe("inactive");
   });
 

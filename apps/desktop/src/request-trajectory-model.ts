@@ -1,3 +1,4 @@
+import { formatExactNumber } from "./format-compact-number";
 import { i18n } from "./i18n";
 import {
   statusLabel,
@@ -433,7 +434,7 @@ export function trajectoryRows(
       rows.push(turnHeaderRow(group));
     }
     for (const turn of group.records) {
-      rows.push(...recordRows(turn, childrenByRoot));
+      rows.push(...recordTrajectoryRows(turn, childrenByRoot));
     }
   }
   return rows;
@@ -508,16 +509,30 @@ export function inspectorChainRows(record: RequestRecord): TrajectoryRow[] {
     }
     rows.push(row);
   }
+  return uniqueRowIds(rows);
+}
+
+// Candidates rejected in one pass can share a timestamp, and a row id is
+// otherwise kind + time + attempt.
+function uniqueRowIds(rows: TrajectoryRow[]): TrajectoryRow[] {
+  const seen = new Map<string, number>();
+  for (const row of rows) {
+    const count = seen.get(row.id) ?? 0;
+    seen.set(row.id, count + 1);
+    if (count > 0) row.id = `${row.id}:${count}`;
+  }
   return rows;
 }
 
-function recordRows(
+/** One call's chain followed by its retry children, as the timeline draws it. */
+export function recordTrajectoryRows(
   turn: RequestRecord,
   childrenByRoot: Record<string, RequestRecord[]>,
 ): TrajectoryRow[] {
   const rows = inspectorChainRows(turn);
   const children = childrenByRoot[turn.id] ?? [];
   children.forEach((child, index) => {
+    const childRows: TrajectoryRow[] = [];
     for (const event of synthesizeEvents(child)) {
       const row = rowFromEvent(child, event, true);
       if (event.kind === "upstream") {
@@ -527,8 +542,9 @@ function recordRows(
           summary: row.summary,
         });
       }
-      rows.push(row);
+      childRows.push(row);
     }
+    rows.push(...uniqueRowIds(childRows));
   });
   return rows;
 }
@@ -551,6 +567,24 @@ function settledEvent(
   return { ...event, status: "succeeded" };
 }
 
+// Core writes call usage into upstream and result summaries as "in → out".
+const USAGE_SEGMENT = /^(\d+) → (\d+)$/;
+
+/** Spell out the bare "in → out" token segment with input/output labels. */
+export function readableUsageSummary(summary: string): string {
+  return summary
+    .split(" · ")
+    .map((part) => {
+      const match = USAGE_SEGMENT.exec(part);
+      if (!match) return part;
+      return i18n.t("trajectory.tokenUsage", {
+        input: formatExactNumber(Number(match[1])),
+        output: formatExactNumber(Number(match[2])),
+      });
+    })
+    .join(" · ");
+}
+
 function rowFromEvent(
   record: RequestRecord,
   rawEvent: RequestEvent,
@@ -559,11 +593,15 @@ function rowFromEvent(
   const event = settledEvent(record, rawEvent);
   const chip =
     child && event.kind === "upstream" ? "RETRY" : chipByKind[event.kind];
+  const summary =
+    event.kind === "upstream" || event.kind === "completed"
+      ? readableUsageSummary(event.summary)
+      : event.summary;
   return {
     id: `${record.id}:${event.kind}:${event.started_at}:${event.attempt_index}`,
     requestId: record.id,
     chip,
-    summary: event.summary || chip,
+    summary: summary || chip,
     result: eventResult(record, event),
     status: event.status,
     tone: eventTone(record, event),

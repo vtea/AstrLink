@@ -28,6 +28,11 @@ import { getDesktopPlatform } from "./window-chrome";
 import { installAppActionLogs } from "./app-activity";
 import { appLog } from "./app-log";
 import { applyTheme, initializeTheme } from "./theme";
+import {
+  applyQuotaDisplayMode,
+  isQuotaDisplayMode,
+  QUOTA_DISPLAY_EVENT,
+} from "./quota-display";
 import { isThemePreference } from "./theme-model";
 import "./styles/globals.css";
 
@@ -49,7 +54,20 @@ installAppActionLogs();
 
 async function loadPreferences(): Promise<void> {
   let themeUpdated = false;
+  let quotaDisplayUpdated = false;
   if (isTauri()) {
+    await listen(QUOTA_DISPLAY_EVENT, ({ payload }) => {
+      if (isQuotaDisplayMode(payload)) {
+        quotaDisplayUpdated = true;
+        applyQuotaDisplayMode(payload);
+      }
+    }).catch((error) =>
+      appLog.error(
+        "ui.preferences",
+        "Unable to observe quota display mode",
+        error,
+      ),
+    );
     // Register before reading preferences so an inspector cannot miss a change.
     await listen("theme-preference-changed", ({ payload }) => {
       if (isThemePreference(payload)) {
@@ -61,6 +79,8 @@ async function loadPreferences(): Promise<void> {
     );
   }
   const settings = await getPreferences();
+  if (!quotaDisplayUpdated)
+    applyQuotaDisplayMode(settings.values.quota_display_mode);
   if (!themeUpdated) applyTheme(settings.values.theme);
   await applyLocale(settings.values.locale);
 }

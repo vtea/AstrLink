@@ -277,6 +277,7 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	}()
 
 	if classified.Model == contract.AstrLinkAutoModelID {
+		session.captureUnreadRequestBody(request)
 		writeInferenceError(outWriter, http.StatusGone, "routing_feature_retired", "astrlink/auto is retired; request an explicit model", false, nil)
 		session.noteFailed(errorSummaryFromInference("routing_feature_retired", "automatic routing is retired", false))
 		return
@@ -292,6 +293,14 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		AllCandidates: session.channelBinding != nil || responsesWSTurnFromContext(request.Context()) != nil,
 	})
 	if err != nil {
+		// No attempt will read the body, so capture it for the audit now.
+		session.captureUnreadRequestBody(request)
+		var unhealthy *endpoint.UnhealthyCandidatesError
+		if errors.As(err, &unhealthy) {
+			for _, id := range unhealthy.Services {
+				session.noteCandidateRejected(id, "circuit_open")
+			}
+		}
 		handler.writeResolveError(outWriter, request, classified, err)
 		return
 	}
@@ -370,8 +379,21 @@ func (handler *Handler) applyPrivacy(
 	if buffered != nil {
 		finish = buffered.Close
 	}
+	session.beginPrivacyInspection(request.Context(), privacyInspectionSummary(policy.Mode, len(body)))
+	inspectCtx := privacy.WithInspectionProgress(request.Context(), func(progress privacy.InspectionProgress) {
+		// A request served from cache is decided at once; rewriting its
+		// record first would only cost a write.
+		if progress.Batches == 0 {
+			return
+		}
+		session.updatePrivacyInspection(
+			request.Context(),
+			privacyProgressSummary(policy.Mode, len(body), progress),
+			privacyBatchProgress(progress),
+		)
+	})
 	result, err := handler.privacyFilter.Inspect(
-		request.Context(),
+		inspectCtx,
 		policy,
 		classified.Protocol,
 		body,
@@ -430,6 +452,55 @@ func (handler *Handler) applyPrivacy(
 	}
 }
 
+// privacyInspectionSummary names the detector and input size, never content.
+func privacyInspectionSummary(mode privacy.Mode, size int) string {
+	summary := "inspecting · " + formatBodySize(size)
+	if mode != "" {
+		summary = string(mode) + " · " + summary
+	}
+	return summary
+}
+
+// privacyProgressSummary adds how far the model has come. Cached text never
+// reaches the model, so it is counted apart from the model's share.
+func privacyProgressSummary(mode privacy.Mode, size int, progress privacy.InspectionProgress) string {
+	summary := privacyInspectionSummary(mode, size) + " · model " +
+		formatBodySize(progress.InspectedBytes) + " of " +
+		formatBodySize(progress.Bytes-progress.CachedBytes)
+	if progress.CachedBytes > 0 {
+		summary += " · cached " + formatBodySize(progress.CachedBytes)
+	}
+	return summary + " · " + privacyBatchProgress(progress)
+}
+
+func privacyBatchProgress(progress privacy.InspectionProgress) string {
+	return fmt.Sprintf("batch %d/%d", progress.CompletedBatches, progress.Batches)
+}
+
+func formatBodySize(size int) string {
+	if size < 1024 {
+		return fmt.Sprintf("%d B", size)
+	}
+	if size < 1024*1024 {
+		return fmt.Sprintf("%.1f KiB", float64(size)/1024)
+	}
+	return fmt.Sprintf("%.1f MiB", float64(size)/(1024*1024))
+}
+
+// detectorFailure names how the detector failed for the local record only;
+// the client reply stays generic. A timeout on a long agent transcript and a
+// worker that never started need different fixes.
+func detectorFailure(err error) (detail, message string) {
+	switch {
+	case errors.Is(err, privacy.ErrDetectorTimeout):
+		return "detector_timeout", "local privacy detector timed out"
+	case errors.Is(err, privacy.ErrDetectorLimit):
+		return "detector_limit", "local privacy detector input limit exceeded"
+	default:
+		return "detector_unavailable", "local privacy detector is unavailable"
+	}
+}
+
 func privacyDecisionSummary(mappingCount int, noticeInjected bool) string {
 	if noticeInjected {
 		return fmt.Sprintf("redact · %d · notice", mappingCount)
@@ -457,9 +528,15 @@ func (handler *Handler) writePrivacyError(writer http.ResponseWriter, request *h
 	case errors.Is(err, privacy.ErrDetectorUnavailable),
 		errors.Is(err, privacy.ErrDetectorLimit),
 		errors.Is(err, privacy.ErrDetectorTimeout):
+		detail, message := detectorFailure(err)
+		// A stuck frame stops at the same batch on every retry; an inspection
+		// that ran out of time stops further along each time.
+		if batch := session.privacyInspectionBatch(); batch != "" {
+			detail += " · " + batch
+		}
 		writeInferenceError(writer, http.StatusServiceUnavailable, "safety_engine_unavailable", "local safety engine is unavailable", true, nil)
-		session.notePrivacyDecision("safety_engine_unavailable", contract.RequestStatusFailed)
-		session.noteFailed(errorSummaryFromInference("safety_engine_unavailable", "local safety engine is unavailable", true))
+		session.notePrivacyDecision("safety_engine_unavailable · "+detail, contract.RequestStatusFailed)
+		session.noteFailed(errorSummaryFromInference("safety_engine_unavailable", message, true))
 	case errors.Is(err, privacy.ErrUnsafeInput):
 		// These content-dependent processing failures are non-retryable, but
 		// are not policy decisions. Only an explicit block is reported as 403.

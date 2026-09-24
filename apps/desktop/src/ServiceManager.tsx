@@ -1,3 +1,4 @@
+import { useWorkspaceSnapshot } from "./workspace-snapshots";
 import { ServiceProxyFields } from "./components/ServiceProxyFields";
 import {
   proxyDraft,
@@ -46,6 +47,7 @@ import { StatusDot } from "@/components/StatusDot";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Combobox } from "@/components/ui/combobox";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -92,6 +94,7 @@ import {
   openAuthorizationURL,
   probeDraftServiceModels,
   probeServiceModels,
+  probeServiceProxy,
   updateService,
 } from "./bridge";
 import { copyButtonLabel, useCopyFeedback } from "./copy-feedback";
@@ -136,6 +139,7 @@ import {
   type SubscriptionServiceKind,
 } from "./service-model";
 import {
+  SubscriptionResetButton,
   SubscriptionUsageMeter,
   type SubscriptionUsageStatus,
 } from "./SubscriptionUsageMeter";
@@ -152,7 +156,11 @@ import {
 } from "./subscription-usage-model";
 
 /** Tabs of the service editor; `models` is the per-provider model list. */
-export type ServiceEditorTab = "connection" | "models" | "protocols" | "failure";
+export type ServiceEditorTab =
+  | "connection"
+  | "models"
+  | "protocols"
+  | "failure";
 
 export type ServiceManagerView =
   | { kind: "list" }
@@ -641,6 +649,13 @@ export function ServiceManager({
   );
   const [query, setQuery] = useState("");
   const [modelQuery, setModelQuery] = useState("");
+  const modelSuggestions = useMemo(
+    () =>
+      [...new Set(services.flatMap((service) => service.models))].sort(
+        (left, right) => left.localeCompare(right),
+      ),
+    [services],
+  );
   const [serviceFilter, setServiceFilter] = useState<ServiceFilter>("all");
   const [draft, setDraft] = useState<Draft>(() =>
     draftForKind("codex_subscription", protocols),
@@ -667,7 +682,7 @@ export function ServiceManager({
   const [modelPreview, setModelPreview] = useState<ModelPreview | null>(null);
   const [modelPreviewQuery, setModelPreviewQuery] = useState("");
   const [editorTab, setEditorTab] = useState<EditorTab>("connection");
-  const [usageByService, setUsageByService] = useState<
+  const [usageByService, setUsageByService] = useWorkspaceSnapshot<
     Record<
       string,
       {
@@ -676,8 +691,12 @@ export function ServiceManager({
         error?: string;
       }
     >
-  >({});
+  >("service-usage", {});
   const [usageEpoch, setUsageEpoch] = useState(0);
+  const [refreshingUsageIDs, setRefreshingUsageIDs] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const pendingUsageIDs = useRef(new Set<string>());
   const [testingService, setTestingService] = useState<Service | null>(null);
   const [billingService, setBillingService] = useState<string | null>(null);
   const copyFeedback = useCopyFeedback();
@@ -688,7 +707,8 @@ export function ServiceManager({
   protocolsRef.current = protocols;
   const viewKind = view.kind;
   const editingServiceID = view.kind === "edit" ? view.serviceId : null;
-  const requestedEditorTab = view.kind === "edit" ? (view.tab ?? "connection") : "connection";
+  const requestedEditorTab =
+    view.kind === "edit" ? (view.tab ?? "connection") : "connection";
   const connectedUsageIDs = useMemo(
     () =>
       services
@@ -699,7 +719,52 @@ export function ServiceManager({
     [services],
   );
 
+  const loadServiceUsage = useCallback(
+    async (id: string, fresh: boolean) => {
+      if (pendingUsageIDs.current.has(id)) return;
+      const generation = usageGeneration.current;
+      pendingUsageIDs.current.add(id);
+      setRefreshingUsageIDs((current) => new Set(current).add(id));
+      try {
+        const usage = await getServiceUsage(id, { fresh });
+        if (usageGeneration.current !== generation) return;
+        setUsageByService((current) => ({
+          ...current,
+          [id]: { status: "ready", usage },
+        }));
+      } catch (cause) {
+        const message = formatSubscriptionUsageError(cause);
+        appLog.error(
+          "ui.services",
+          `AstrLink failed to load subscription usage ${id}`,
+          cause,
+        );
+        if (usageGeneration.current !== generation) return;
+        setUsageByService((current) => ({
+          ...current,
+          [id]: {
+            status: "error",
+            usage: current[id]?.usage,
+            error: message,
+          },
+        }));
+      } finally {
+        if (usageGeneration.current === generation) {
+          pendingUsageIDs.current.delete(id);
+          setRefreshingUsageIDs((current) => {
+            const next = new Set(current);
+            next.delete(id);
+            return next;
+          });
+        }
+      }
+    },
+    [setUsageByService],
+  );
+
   useEffect(() => {
+    pendingUsageIDs.current.clear();
+    setRefreshingUsageIDs(new Set());
     if (view.kind !== "list" || !isReady) return;
     const ids = connectedUsageIDs === "" ? [] : connectedUsageIDs.split("\0");
     const generation = usageGeneration.current + 1;
@@ -714,7 +779,8 @@ export function ServiceManager({
         }
       > = {};
       for (const id of ids) {
-        next[id] = { status: "loading", usage: current[id]?.usage };
+        // Keep both cached data and cached errors visible during revalidation.
+        next[id] = current[id] ?? { status: "loading" };
       }
       return next;
     });
@@ -723,35 +789,18 @@ export function ServiceManager({
     // epoch is the operator pressing refresh or resetting a window, and they
     // expect the provider's current numbers.
     const fresh = usageEpoch > 0;
-    void Promise.all(
-      ids.map(async (id) => {
-        try {
-          const usage = await getServiceUsage(id, { fresh });
-          if (usageGeneration.current !== generation) return;
-          setUsageByService((current) => ({
-            ...current,
-            [id]: { status: "ready", usage },
-          }));
-        } catch (cause) {
-          const message = formatSubscriptionUsageError(cause);
-          appLog.error(
-            "ui.services",
-            `AstrLink failed to load subscription usage ${id}`,
-            cause,
-          );
-          if (usageGeneration.current !== generation) return;
-          setUsageByService((current) => ({
-            ...current,
-            [id]: {
-              status: "error",
-              usage: current[id]?.usage,
-              error: message,
-            },
-          }));
-        }
-      }),
-    );
-  }, [connectedUsageIDs, isReady, usageEpoch, view.kind]);
+    void Promise.all(ids.map((id) => loadServiceUsage(id, fresh)));
+    return () => {
+      usageGeneration.current += 1;
+    };
+  }, [
+    connectedUsageIDs,
+    isReady,
+    usageEpoch,
+    view.kind,
+    setUsageByService,
+    loadServiceUsage,
+  ]);
 
   const dirty =
     view.kind !== "list" &&
@@ -1429,16 +1478,7 @@ export function ServiceManager({
           className="@max-[360px]:gap-2"
           actions={
             <>
-              <ServiceOrderHelp ready={isReady && catalogStatus === "ready"}>
-                <p>{t("services.orderHint")}</p>
-                {filtered ? (
-                  <p className="mt-2">{t("services.orderFiltered")}</p>
-                ) : null}
-                {routingDefaults.loaded &&
-                !routingDefaults.allow_unmatched_failover ? (
-                  <p className="mt-2">{t("failure.globalOffHint")}</p>
-                ) : null}
-              </ServiceOrderHelp>
+              <ServiceOrderHelp ready={isReady && catalogStatus === "ready"} />
               <IconButton
                 label={
                   busy ? t("common.refreshing") : t("services.refreshList")
@@ -1507,12 +1547,13 @@ export function ServiceManager({
             placeholder={t("services.searchServicesPlaceholder")}
             clearLabel={t("common.clearSearch")}
             secondaryFilters={
-              <Input
+              <Combobox
                 aria-label={t("services.filterModel")}
-                className="h-8 w-full"
-                onChange={(event) => setModelQuery(event.currentTarget.value)}
+                clearLabel={t("common.clearSearch")}
+                emptyMessage={t("services.noModelSuggestions")}
+                onValueChange={setModelQuery}
+                options={modelSuggestions}
                 placeholder={t("services.filterModelPlaceholder")}
-                type="search"
                 value={modelQuery}
               />
             }
@@ -1592,6 +1633,7 @@ export function ServiceManager({
                     t("services.columnService"),
                     t("services.columnModels"),
                     t("services.columnUsage"),
+                    t("services.columnBilling"),
                     t("services.columnStatus"),
                     t("services.columnActions"),
                   ]}
@@ -1751,11 +1793,37 @@ export function ServiceManager({
                           </>
                         }
                         usage={
-                          <div className="grid gap-1">
+                          hasPlanUsage(service) ? (
+                            <SubscriptionUsageMeter
+                              error={usageByService[service.id]?.error}
+                              now={new Date()}
+                              onRefresh={
+                                isReady
+                                  ? () =>
+                                      void loadServiceUsage(service.id, true)
+                                  : undefined
+                              }
+                              refreshing={refreshingUsageIDs.has(service.id)}
+                              status={
+                                usageByService[service.id]?.status ?? "loading"
+                              }
+                              usage={usageByService[service.id]?.usage}
+                            />
+                          ) : undefined
+                        }
+                        billing={
+                          <div className="grid justify-items-start gap-1.5">
+                            <ServiceBillingMeter
+                              serviceId={service.id}
+                              ready={isReady}
+                              epoch={usageEpoch}
+                              observedAt={
+                                usageByService[service.id]?.usage?.fetched_at
+                              }
+                              onOpen={() => setBillingService(service.id)}
+                            />
                             {hasPlanUsage(service) ? (
-                              <SubscriptionUsageMeter
-                                error={usageByService[service.id]?.error}
-                                now={new Date()}
+                              <SubscriptionResetButton
                                 onReset={() =>
                                   setConfirmAction({
                                     kind: "reset-usage",
@@ -1767,22 +1835,9 @@ export function ServiceManager({
                                   })
                                 }
                                 resetting={actionID === service.id}
-                                status={
-                                  usageByService[service.id]?.status ??
-                                  "loading"
-                                }
                                 usage={usageByService[service.id]?.usage}
                               />
                             ) : null}
-                            <ServiceBillingMeter
-                              serviceId={service.id}
-                              ready={isReady}
-                              epoch={usageEpoch}
-                              observedAt={
-                                usageByService[service.id]?.usage?.fetched_at
-                              }
-                              onOpen={() => setBillingService(service.id)}
-                            />
                           </div>
                         }
                         status={
@@ -2399,6 +2454,14 @@ export function ServiceManager({
       </section>
     </Panel>
   );
+  const proxyTestTarget =
+    draft.kind === "codex_subscription"
+      ? "https://chatgpt.com"
+      : draft.kind === "claude_subscription"
+        ? "https://api.anthropic.com"
+        : draft.kind === "grok_subscription"
+          ? "https://api.x.ai"
+          : draft.baseURL.trim();
   const connectionFields = (
     <div className="grid min-w-0 items-start gap-4 pb-2 @[760px]:grid-cols-2">
       <Panel>
@@ -2779,6 +2842,15 @@ export function ServiceManager({
         value={draft.proxy}
         onChange={(proxy) => setDraft((current) => ({ ...current, proxy }))}
         hasCredential={Boolean(editing?.service.proxy?.credential_ref)}
+        testDisabled={!isReady || saving}
+        testTarget={proxyTestTarget}
+        onTest={() =>
+          probeServiceProxy({
+            ...(editing ? { service_id: editing.service.id } : {}),
+            proxy: proxyInput(draft.proxy)!,
+            target_url: proxyTestTarget,
+          })
+        }
       />
     </div>
   );
