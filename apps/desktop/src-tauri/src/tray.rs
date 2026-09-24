@@ -25,6 +25,7 @@ use tauri::{
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
 use crate::{
+    app_log,
     i18n::{self, Locale},
     preferences::{
         PreferencesStore, QuotaDisplayMode, TrayMenubarText, TrayPreferences, TrayUsagePreferences,
@@ -654,9 +655,11 @@ async fn collect_subscriptions(manager: &Arc<CoreManager>, fresh: bool) -> Vec<S
             match manager.get_service_usage_with(&id, fresh).await {
                 Ok(usage) => subscription_from(&name, &usage),
                 Err(error) => {
-                    // Visible in the dev log; the panel just omits the plan
-                    // until the next refresh succeeds.
-                    eprintln!("tray: subscription usage for {id} unavailable: {error}");
+                    // The panel omits the plan until the next refresh succeeds.
+                    app_log::warning!(
+                        "shell.tray",
+                        "subscription usage for {id} unavailable: {error}"
+                    );
                     None
                 }
             }
@@ -1030,12 +1033,15 @@ pub fn refresh(app: &AppHandle) {
     };
     if changed {
         if let Err(error) = render(app, &model) {
-            eprintln!("unable to render AstrLink tray: {error}");
+            app_log::error!("shell.tray", "unable to render AstrLink tray: {error}");
         }
     }
     if app.get_webview_window(POPOVER_LABEL).is_some() {
         if let Err(error) = app.emit_to(POPOVER_LABEL, STATE_EVENT, state_snapshot(app, None)) {
-            eprintln!("unable to update the AstrLink tray popover: {error}");
+            app_log::error!(
+                "shell.tray",
+                "unable to update the AstrLink tray popover: {error}"
+            );
         }
     }
 }
@@ -1150,7 +1156,7 @@ fn handle_fallback_menu(app: &AppHandle, id: &str) {
         ID_CORE_START => run_core(app, CoreOp::Start),
         ID_CORE_STOP => run_core(app, CoreOp::Stop),
         ID_CORE_RESTART => run_core(app, CoreOp::Restart),
-        other => eprintln!("unhandled AstrLink tray item: {other}"),
+        other => app_log::warning!("shell.tray", "unhandled AstrLink tray item: {other}"),
     }
 }
 
@@ -1272,13 +1278,19 @@ fn run_core(app: &AppHandle, op: CoreOp) {
     match op {
         CoreOp::Start => {
             if let Err(error) = manager.start(app) {
-                eprintln!("unable to start astrlink-core from the tray: {error}");
+                app_log::error!(
+                    "shell.tray",
+                    "unable to start astrlink-core from the tray: {error}"
+                );
             }
         }
         CoreOp::Stop => {
             tauri::async_runtime::spawn(async move {
                 if let Err(error) = manager.stop_and_wait().await {
-                    eprintln!("unable to stop astrlink-core from the tray: {error}");
+                    app_log::error!(
+                        "shell.tray",
+                        "unable to stop astrlink-core from the tray: {error}"
+                    );
                 }
             });
         }
@@ -1286,7 +1298,10 @@ fn run_core(app: &AppHandle, op: CoreOp) {
             let app = app.clone();
             tauri::async_runtime::spawn(async move {
                 if let Err(error) = manager.restart(&app).await {
-                    eprintln!("unable to restart astrlink-core from the tray: {error}");
+                    app_log::error!(
+                        "shell.tray",
+                        "unable to restart astrlink-core from the tray: {error}"
+                    );
                 }
             });
         }
@@ -1296,7 +1311,10 @@ fn run_core(app: &AppHandle, op: CoreOp) {
 fn navigate(app: &AppHandle, kind: &str) {
     crate::show_main_window(app);
     if let Err(error) = app.emit_to("main", NAVIGATE_EVENT, kind) {
-        eprintln!("unable to route the AstrLink tray to {kind}: {error}");
+        app_log::error!(
+            "shell.tray",
+            "unable to route the AstrLink tray to {kind}: {error}"
+        );
     }
 }
 
@@ -1393,7 +1411,10 @@ fn toggle_popover(app: &AppHandle, position: PhysicalPosition<f64>, rect: Rect) 
         }
     }
     let Some(anchor) = anchor_from_click(app, position, rect) else {
-        eprintln!("unable to locate the monitor behind the AstrLink tray icon");
+        app_log::error!(
+            "shell.tray",
+            "unable to locate the monitor behind the AstrLink tray icon"
+        );
         crate::show_main_window(app);
         return;
     };
@@ -1430,7 +1451,10 @@ fn toggle_popover(app: &AppHandle, position: PhysicalPosition<f64>, rect: Rect) 
         match built {
             Ok(()) => present_popover(&app),
             Err(error) => {
-                eprintln!("unable to create the AstrLink tray popover: {error}");
+                app_log::error!(
+                    "shell.tray",
+                    "unable to create the AstrLink tray popover: {error}"
+                );
                 crate::show_main_window(&app);
             }
         }
@@ -1444,14 +1468,20 @@ fn present_popover(app: &AppHandle) {
         return;
     };
     if let Err(error) = window.show() {
-        eprintln!("unable to show the AstrLink tray popover: {error}");
+        app_log::error!(
+            "shell.tray",
+            "unable to show the AstrLink tray popover: {error}"
+        );
     }
     let _ = window.set_focus();
     if let Some(state) = app.try_state::<TrayState>() {
         state.lock().popover_shown_at = Some(Instant::now());
     }
     if let Err(error) = app.emit_to(POPOVER_LABEL, STATE_EVENT, state_snapshot(app, None)) {
-        eprintln!("unable to seed the AstrLink tray popover: {error}");
+        app_log::error!(
+            "shell.tray",
+            "unable to seed the AstrLink tray popover: {error}"
+        );
     }
     request_usage_refresh(app, false, PlanRefresh::IfOlderThan(PLAN_REFRESH_VISIBLE));
 }
@@ -1553,8 +1583,9 @@ pub async fn refresh_usage(app: AppHandle, plans: PlanRefresh) {
         {
             Ok((digest, at)) => Some((Some(digest), at)),
             Err(_) => {
-                eprintln!(
-                    "tray: usage digest collection exceeded {}s; keeping the previous numbers",
+                app_log::warning!(
+                    "shell.tray",
+                    "usage digest collection exceeded {}s; keeping the previous numbers",
                     DIGEST_TIMEOUT.as_secs()
                 );
                 None

@@ -139,6 +139,14 @@ def main():
         bin_dir = root / "Contents/MacOS"
         runtime = root / "Contents/Frameworks/libonnxruntime.1.23.2.dylib"
         notices = root / "Contents/Resources/notices/onnxruntime-1.23.2"
+        try:
+            command(["codesign", "--verify", "--deep", "--strict", str(root)])
+        except subprocess.CalledProcessError as error:
+            detail = (error.output or "").strip()
+            raise RuntimeError(
+                "macOS app bundle signature is incomplete"
+                + (f": {detail}" if detail else "")
+            ) from error
     else:
         bin_dir = root / "usr/bin"
         lib_dir = root / "usr/lib"

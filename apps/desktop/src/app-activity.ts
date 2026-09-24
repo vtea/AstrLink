@@ -19,9 +19,13 @@ const SECRET_HINT = /password|token|secret|credential|api[-_]?key/i;
 export function describeWorkspacePage(page: {
   kind: string;
   serviceId?: string;
+  tokenId?: string;
 }): string {
   if (page.kind === "edit" && page.serviceId) {
     return `page edit ${page.serviceId}`;
+  }
+  if (page.kind === "records" && page.tokenId) {
+    return `page records ${page.tokenId}`;
   }
   return `page ${page.kind}`;
 }

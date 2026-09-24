@@ -20,11 +20,17 @@ describe("app activity logs", () => {
     expect(describeWorkspacePage({ kind: "edit", serviceId: "svc_1" })).toBe(
       "page edit svc_1",
     );
+    expect(describeWorkspacePage({ kind: "records" })).toBe("page records");
+    expect(
+      describeWorkspacePage({ kind: "records", tokenId: "token_01" }),
+    ).toBe("page records token_01");
   });
 
   it("logs the clicked control name", () => {
     document.body.innerHTML = `<button>获取模型列表</button><input id="search" />`;
-    expect(describeClick(document.querySelector("button"))).toBe("click 获取模型列表");
+    expect(describeClick(document.querySelector("button"))).toBe(
+      "click 获取模型列表",
+    );
     expect(describeClick(document.querySelector("input"))).toBeUndefined();
   });
 
@@ -33,8 +39,12 @@ describe("app activity logs", () => {
     expect(describeClick(document.querySelector("strong"))).toBe(
       "click request-session session_123",
     );
-    document.querySelector("button")!.setAttribute("data-session-id", "private prompt");
-    expect(describeClick(document.querySelector("strong"))).toBe("click request-session");
+    document
+      .querySelector("button")!
+      .setAttribute("data-session-id", "private prompt");
+    expect(describeClick(document.querySelector("strong"))).toBe(
+      "click request-session",
+    );
   });
 
   it("logs a selected option and a checkbox without free-text or secret values", () => {
@@ -44,14 +54,20 @@ describe("app activity logs", () => {
       <input type="password" aria-label="密钥" value="super-secret" />
       <input aria-label="搜索" value="gpt-5" />
     `;
-    expect(describeChange(document.querySelector("select"))).toBe("change 级别 error");
-    expect(describeChange(document.querySelector("input[type='checkbox']"))).toBe(
-      "change 启用 on",
+    expect(describeChange(document.querySelector("select"))).toBe(
+      "change 级别 error",
     );
-    const secret = describeChange(document.querySelector("input[type='password']"));
+    expect(
+      describeChange(document.querySelector("input[type='checkbox']")),
+    ).toBe("change 启用 on");
+    const secret = describeChange(
+      document.querySelector("input[type='password']"),
+    );
     expect(secret).toBe("change 密钥");
     expect(secret).not.toContain("super-secret");
-    const text = describeChange(document.querySelector("input[aria-label='搜索']"));
+    const text = describeChange(
+      document.querySelector("input[aria-label='搜索']"),
+    );
     expect(text).toBe("change 搜索");
     expect(text).not.toContain("gpt-5");
   });
@@ -60,8 +76,12 @@ describe("app activity logs", () => {
     const debug = vi.spyOn(appLog, "debug").mockImplementation(() => {});
     document.body.innerHTML = `<button>概览</button><select aria-label="级别"><option selected>info</option></select>`;
     const stop = installAppActionLogs();
-    document.querySelector("button")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    document.querySelector("select")?.dispatchEvent(new Event("change", { bubbles: true }));
+    document
+      .querySelector("button")
+      ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    document
+      .querySelector("select")
+      ?.dispatchEvent(new Event("change", { bubbles: true }));
     expect(debug).toHaveBeenCalledWith("ui.action", "click 概览");
     expect(debug).toHaveBeenCalledWith("ui.action", "change 级别 info");
     stop();

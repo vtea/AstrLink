@@ -95,8 +95,9 @@ jobs:
       - name: Stage Core and worker sidecars
         run: bun run sidecar:build
       - name: Build development app and DMG
+        # Ad-hoc identity from tauri.conf.json signs the whole .app before the DMG.
         # No Developer ID certificate or notarization credentials are required.
-        run: bun run tauri build --ci --no-sign --bundles app,dmg
+        run: bun run tauri build --ci --bundles app,dmg
       - name: Mount DMG and verify packaged application
         env:
           PACKAGE_ARCH: ${{ matrix.arch }}

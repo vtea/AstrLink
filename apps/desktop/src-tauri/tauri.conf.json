@@ -58,7 +58,9 @@
     ],
     "macOS": {
       "frameworks": ["binaries/libonnxruntime.1.23.2.dylib"],
-      "minimumSystemVersion": "13.4"
+      "minimumSystemVersion": "13.4",
+      "signingIdentity": "-",
+      "hardenedRuntime": false
     },
     "targets": "all"
   }

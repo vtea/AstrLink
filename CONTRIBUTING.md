@@ -69,7 +69,8 @@ bun run desktop:build
 ```
 
 构建产物位于 `apps/desktop/src-tauri/target/release/bundle/`；指定 Rust
-target 时位于相应 target 子目录中。应用签名、公证和正式发布需要另行配置。
+target 时位于相应 target 子目录中。macOS 分发包在生成 DMG 前使用临时身份签完整包，不是 Developer
+ID，也没有公证。
 
 ## GitHub Actions 打包
 
@@ -122,7 +123,7 @@ push 和 Release 发布时，后到的重复构建会取消仍在进行的那一
 标签指向的提交必须包含这些工作流。`release`
 事件还要求默认分支上有这些工作流。旧版本标签不会自动取得默认分支上的新流程。
 
-macOS 包仍不使用 Developer ID 签名或公证。正式签名需要另行配置 Apple 凭据。
+macOS 分发包使用临时整包签名，不是 Developer ID，也没有公证。
 
 已安装的应用不会因为新的 Release 自动升级；用户需要下载并安装新的安装包。
 

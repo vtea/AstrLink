@@ -733,13 +733,13 @@ export function ServiceManager({
           [id]: { status: "ready", usage },
         }));
       } catch (cause) {
+        if (usageGeneration.current !== generation) return;
         const message = formatSubscriptionUsageError(cause);
         appLog.error(
           "ui.services",
           `AstrLink failed to load subscription usage ${id}`,
           cause,
         );
-        if (usageGeneration.current !== generation) return;
         setUsageByService((current) => ({
           ...current,
           [id]: {
